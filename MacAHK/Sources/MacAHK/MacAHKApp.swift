@@ -13,8 +13,8 @@ struct MacAHKApp: App {
         // Quick access while the main window is closed; the app keeps
         // running so hotkeys stay live.
         MenuBarExtra("MacAHK", systemImage: menuBarSymbol) {
-            Button("Record New Macro") { app.beginRecording() }
-                .disabled(app.isBusy)
+            Button(recordMenuTitle) { app.toggleRecording() }
+                .disabled(app.isBusy && !app.isRecordingOrCounting)
             if app.isBusy {
                 Button("Stop (Esc)") { app.stopAll() }
             }
@@ -29,6 +29,12 @@ struct MacAHKApp: App {
             Divider()
             Button("Quit MacAHK") { NSApplication.shared.terminate(nil) }
         }
+    }
+
+    private var recordMenuTitle: String {
+        let hint = app.recordHotkey.map { "  (\($0.display))" } ?? ""
+        return app.isRecordingOrCounting ? "Stop Recording\(hint)"
+                                         : "Record New Macro\(hint)"
     }
 
     private var menuBarSymbol: String {

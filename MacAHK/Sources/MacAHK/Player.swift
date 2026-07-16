@@ -3,10 +3,9 @@ import AppKit
 import CoreGraphics
 import CEventCodec
 
-// Replays recorded events by reconstructing each raw CGEvent and posting
-// it back to the window server, preserving original timing (optionally
-// scaled). Esc aborts immediately; any keys still held when playback
-// ends are released so nothing sticks.
+// Replays a macro's steps: raw recorded events are reconstructed and
+// posted verbatim; manual actions are synthesized. Esc aborts instantly;
+// any keys still held when playback ends are released.
 final class Player {
     private(set) var isPlaying = false
     private var abortFlag = false
@@ -14,11 +13,11 @@ final class Player {
     private var escMonitor: Any?
 
     // progress(loop, totalLoops) and done(aborted) are called on main.
-    func play(events: [RecordedEvent], loops: Int, speed: Double,
+    func play(items: [MacroItem], loops: Int, speed: Double,
               progress: @escaping (Int, Int) -> Void,
               done: @escaping (Bool) -> Void) -> Bool {
         stateLock.lock()
-        guard !isPlaying, !events.isEmpty else {
+        guard !isPlaying, !items.isEmpty else {
             stateLock.unlock()
             return false
         }
@@ -34,7 +33,7 @@ final class Player {
         let clampedSpeed = max(speed, 0.05)
         Thread.detachNewThread { [weak self] in
             guard let self else { return }
-            let aborted = self.run(events: events, loops: loops,
+            let aborted = self.run(items: items, loops: loops,
                                    speed: clampedSpeed, progress: progress)
             DispatchQueue.main.async {
                 if let m = self.escMonitor { NSEvent.removeMonitor(m) }
@@ -57,7 +56,7 @@ final class Player {
         return abortFlag
     }
 
-    private func run(events: [RecordedEvent], loops: Int, speed: Double,
+    private func run(items: [MacroItem], loops: Int, speed: Double,
                      progress: @escaping (Int, Int) -> Void) -> Bool {
         var heldKeys = Set<Int64>()
         var loop = 0
@@ -66,16 +65,10 @@ final class Player {
             let currentLoop = loop
             DispatchQueue.main.async { progress(currentLoop, loops) }
 
-            var prevT = 0.0
-            for e in events {
+            for item in items {
+                sleepInterruptibly(item.delay / speed)
                 if aborted { break }
-                sleepInterruptibly((e.t - prevT) / speed)
-                prevT = e.t
-                if aborted { break }
-                guard let event = MAHEventCreateFromData(e.data as CFData)
-                else { continue }
-                trackHeldKeys(e, event: event, held: &heldKeys)
-                event.post(tap: .cghidEventTap)
+                execute(item, held: &heldKeys)
             }
             if loops > 0 && loop >= loops { break }
         }
@@ -88,6 +81,92 @@ final class Player {
         return wasAborted
     }
 
+    private func execute(_ item: MacroItem, held: inout Set<Int64>) {
+        switch item.payload {
+        case .raw(let type, let data):
+            guard let event = MAHEventCreateFromData(data as CFData)
+            else { return }
+            trackHeldKeys(type: type, event: event, held: &held)
+            event.post(tap: .cghidEventTap)
+        case .action(let action):
+            perform(action)
+        }
+    }
+
+    // MARK: synthesized actions
+
+    private func perform(_ action: ManualAction) {
+        let src = CGEventSource(stateID: .combinedSessionState)
+        switch action {
+        case .wait:
+            break
+
+        case .movePointer(let x, let y):
+            CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
+                    mouseCursorPosition: CGPoint(x: x, y: y),
+                    mouseButton: .left)?
+                .post(tap: .cghidEventTap)
+
+        case .click(let x, let y, let button, let count):
+            let pt = CGPoint(x: x, y: y)
+            for i in 1...max(count, 1) {
+                for (type, _) in [(button.downType, true),
+                                  (button.upType, false)] {
+                    guard let e = CGEvent(
+                        mouseEventSource: src, mouseType: type,
+                        mouseCursorPosition: pt,
+                        mouseButton: button.cgButton) else { continue }
+                    e.setIntegerValueField(.mouseEventClickState,
+                                           value: Int64(i))
+                    e.post(tap: .cghidEventTap)
+                }
+                if count > 1 { Thread.sleep(forTimeInterval: 0.08) }
+            }
+
+        case .keyPress(let code, let modifiers):
+            let flags = Hotkey(keyCode: code, modifiers: modifiers).cgFlags
+            if let down = CGEvent(keyboardEventSource: src,
+                                  virtualKey: CGKeyCode(code), keyDown: true) {
+                down.flags = flags
+                down.post(tap: .cghidEventTap)
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+            if let up = CGEvent(keyboardEventSource: src,
+                                virtualKey: CGKeyCode(code), keyDown: false) {
+                up.flags = flags
+                up.post(tap: .cghidEventTap)
+            }
+
+        case .typeText(let text):
+            var chars = Array(text.utf16)
+            // The unicode-string API takes short runs reliably; chunk it.
+            var start = 0
+            while start < chars.count {
+                let run = Array(chars[start..<min(start + 20, chars.count)])
+                if let down = CGEvent(keyboardEventSource: src,
+                                      virtualKey: 0, keyDown: true) {
+                    down.keyboardSetUnicodeString(stringLength: run.count,
+                                                  unicodeString: run)
+                    down.post(tap: .cghidEventTap)
+                }
+                if let up = CGEvent(keyboardEventSource: src,
+                                    virtualKey: 0, keyDown: false) {
+                    up.post(tap: .cghidEventTap)
+                }
+                start += 20
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+
+        case .scroll(let dx, let dy):
+            CGEvent(scrollWheelEvent2Source: src, units: .pixel,
+                    wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx),
+                    wheel3: 0)?
+                .post(tap: .cghidEventTap)
+        }
+    }
+
+    // MARK: cleanup
+
     // Sleep in short slices so Esc lands fast even inside long waits.
     private func sleepInterruptibly(_ seconds: Double) {
         var remaining = seconds
@@ -98,16 +177,17 @@ final class Player {
         }
     }
 
-    private func trackHeldKeys(_ e: RecordedEvent, event: CGEvent,
+    private func trackHeldKeys(type: UInt32, event: CGEvent,
                                held: inout Set<Int64>) {
-        if e.type == 10 {
-            held.insert(event.getIntegerValueField(.keyboardEventKeycode))
-        } else if e.type == 11 {
-            held.remove(event.getIntegerValueField(.keyboardEventKeycode))
-        } else if e.type == 12 {
-            // Modifier transitions: track the key code either way; the
-            // final cleanup key-up is harmless if it was already released.
-            held.insert(event.getIntegerValueField(.keyboardEventKeycode))
+        let code = event.getIntegerValueField(.keyboardEventKeycode)
+        if type == 10 {
+            held.insert(code)
+        } else if type == 11 {
+            held.remove(code)
+        } else if type == 12 {
+            // Modifier transitions: track the key either way; a spare
+            // cleanup key-up is harmless if it was already released.
+            held.insert(code)
         }
     }
 

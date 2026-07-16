@@ -24,8 +24,12 @@ final class Recorder {
 
     private(set) var events: [RecordedEvent] = []
     var captureMoves = false
-    // Called on the main queue when the user presses Esc.
+    // Called on the main queue when the user presses Esc (or the record
+    // hotkey, if one is set).
     var onEscape: (() -> Void)?
+    // The global start/stop-recording hotkey; its keystrokes are treated
+    // like Esc so they never end up inside the recording itself.
+    var stopHotkey: Hotkey?
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -85,10 +89,17 @@ final class Recorder {
 
         let raw = type.rawValue
 
-        // Esc ends the recording and is never stored.
+        // Esc and the record hotkey end the recording and are never stored.
         if raw == 10 || raw == 11 {
-            if event.getIntegerValueField(.keyboardEventKeycode) == Self.escKeyCode {
+            let code = event.getIntegerValueField(.keyboardEventKeycode)
+            if code == Self.escKeyCode {
                 if raw == 10 {
+                    DispatchQueue.main.async { [weak self] in self?.onEscape?() }
+                }
+                return
+            }
+            if let hk = stopHotkey, code == Int64(hk.keyCode) {
+                if raw == 10 && event.flags.contains(hk.cgFlags) {
                     DispatchQueue.main.async { [weak self] in self?.onEscape?() }
                 }
                 return

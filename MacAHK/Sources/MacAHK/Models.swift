@@ -1,14 +1,89 @@
 import Foundation
 import AppKit
+import CoreGraphics
+import CEventCodec
 
-// One captured input event: a serialized raw CGEvent plus the moment it
-// happened, in seconds since the start of the recording. Keeping the raw
-// bytes means keys, clicks, drags, scrolls (with momentum phases) and
-// trackpad gestures all round-trip with full fidelity.
+// A raw captured input event, as it comes off the event tap: serialized
+// CGEvent bytes plus seconds since the start of the recording.
 struct RecordedEvent: Codable {
     var t: Double
     var type: UInt32
     var data: Data
+}
+
+// A macro is an ordered list of steps. Each step waits `delay` seconds
+// after the previous one, then performs its payload — either a raw
+// recorded event replayed verbatim, or an action the user added by hand.
+// The split is what makes recordings editable: steps can be reordered,
+// deleted, and interleaved with manual actions freely.
+struct MacroItem: Codable, Identifiable, Equatable {
+    var id: UUID = UUID()
+    var delay: Double
+    var payload: Payload
+    var label: String
+
+    enum Payload: Codable, Equatable {
+        case raw(type: UInt32, data: Data)
+        case action(ManualAction)
+    }
+}
+
+enum MouseButtonKind: String, Codable, CaseIterable, Identifiable {
+    case left, right, middle
+    var id: String { rawValue }
+
+    var cgButton: CGMouseButton {
+        switch self {
+        case .left: return .left
+        case .right: return .right
+        case .middle: return .center
+        }
+    }
+
+    var downType: CGEventType {
+        switch self {
+        case .left: return .leftMouseDown
+        case .right: return .rightMouseDown
+        case .middle: return .otherMouseDown
+        }
+    }
+
+    var upType: CGEventType {
+        switch self {
+        case .left: return .leftMouseUp
+        case .right: return .rightMouseUp
+        case .middle: return .otherMouseUp
+        }
+    }
+}
+
+// Every action a user can add without recording.
+enum ManualAction: Codable, Equatable {
+    case click(x: Double, y: Double, button: MouseButtonKind, count: Int)
+    case movePointer(x: Double, y: Double)
+    case keyPress(keyCode: UInt16, modifiers: UInt)
+    case typeText(text: String)
+    case scroll(dx: Int, dy: Int)
+    case wait
+
+    var label: String {
+        switch self {
+        case .click(let x, let y, let button, let count):
+            let prefix = count == 2 ? "double " : count == 3 ? "triple " : ""
+            return "\(prefix)\(button.rawValue) click at (\(Int(x)), \(Int(y)))"
+        case .movePointer(let x, let y):
+            return "move pointer to (\(Int(x)), \(Int(y)))"
+        case .keyPress(let code, let mods):
+            return "press \(Hotkey(keyCode: code, modifiers: mods).display)"
+        case .typeText(let text):
+            let short = text.count > 24 ? String(text.prefix(24)) + "…" : text
+            return "type “\(short)”"
+        case .scroll(let dx, let dy):
+            return "scroll (\(dx), \(dy))"
+        case .wait:
+            return "wait"
+        }
+    }
 }
 
 struct Hotkey: Codable, Equatable {
@@ -16,6 +91,15 @@ struct Hotkey: Codable, Equatable {
     var modifiers: UInt  // NSEvent.ModifierFlags rawValue, device-independent
 
     var flags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifiers) }
+
+    var cgFlags: CGEventFlags {
+        var f = CGEventFlags()
+        if flags.contains(.command) { f.insert(.maskCommand) }
+        if flags.contains(.option) { f.insert(.maskAlternate) }
+        if flags.contains(.control) { f.insert(.maskControl) }
+        if flags.contains(.shift) { f.insert(.maskShift) }
+        return f
+    }
 
     var display: String {
         var s = ""
@@ -27,43 +111,118 @@ struct Hotkey: Codable, Equatable {
     }
 }
 
-struct Macro: Codable, Identifiable, Equatable {
+struct Macro: Identifiable, Equatable {
     var id: UUID = UUID()
     var name: String
     var created: Date = Date()
     var hotkey: Hotkey?
-    var events: [RecordedEvent]
+    var items: [MacroItem]
 
     static func == (a: Macro, b: Macro) -> Bool { a.id == b.id }
 
-    var duration: Double { events.last?.t ?? 0 }
+    var duration: Double { items.reduce(0) { $0 + $1.delay } }
 
-    // Small human summary for the UI: "12 clicks, 340 keys, 3 gestures".
     var summary: String {
-        var clicks = 0, keys = 0, scrolls = 0, gestures = 0, moves = 0
-        for e in events {
-            switch e.type {
-            case 1, 2, 3, 4, 25, 26: clicks += 1
-            case 10, 11, 12: keys += 1
-            case 22: scrolls += 1
-            case 5, 6, 7, 27: moves += 1
-            case 18, 19, 20, 29, 30, 31, 32, 34: gestures += 1
-            default: break
-            }
-        }
-        var parts: [String] = []
-        if clicks > 0 { parts.append("\(clicks) click ev") }
-        if keys > 0 { parts.append("\(keys) key ev") }
-        if scrolls > 0 { parts.append("\(scrolls) scroll ev") }
-        if gestures > 0 { parts.append("\(gestures) gesture ev") }
-        if moves > 0 { parts.append("\(moves) move ev") }
-        if parts.isEmpty { parts.append("\(events.count) events") }
-        return parts.joined(separator: ", ") + String(format: "  ·  %.1fs", duration)
+        let manual = items.filter {
+            if case .action = $0.payload { return true } else { return false }
+        }.count
+        var s = "\(items.count) steps"
+        if manual > 0 { s += " (\(manual) manual)" }
+        return s + String(format: "  ·  %.1fs", duration)
     }
 }
 
-// Persists macros as individual JSON files in Application Support, so
-// they survive updates and can be backed up or synced like any document.
+// Codable by hand so macros saved by the previous version (a flat list
+// of timestamped events) still load; they're converted to steps.
+extension Macro: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, created, hotkey, items, events
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        created = try c.decode(Date.self, forKey: .created)
+        hotkey = try c.decodeIfPresent(Hotkey.self, forKey: .hotkey)
+        if let items = try c.decodeIfPresent([MacroItem].self, forKey: .items) {
+            self.items = items
+        } else if let events = try c.decodeIfPresent(
+            [RecordedEvent].self, forKey: .events) {
+            self.items = Macro.items(from: events)
+        } else {
+            self.items = []
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(created, forKey: .created)
+        try c.encodeIfPresent(hotkey, forKey: .hotkey)
+        try c.encode(items, forKey: .items)
+    }
+
+    // Convert a recording (absolute timestamps) into steps (relative
+    // delays), dropping trailing modifier noise from the stop shortcut.
+    static func items(from events: [RecordedEvent]) -> [MacroItem] {
+        var evs = events
+        while let last = evs.last, last.type == 12 { evs.removeLast() }
+        var prev = 0.0
+        return evs.map { e in
+            let item = MacroItem(
+                delay: max(0, e.t - prev),
+                payload: .raw(type: e.type, data: e.data),
+                label: RawEventInfo.label(type: e.type, data: e.data))
+            prev = e.t
+            return item
+        }
+    }
+}
+
+// Human-readable one-liners for raw recorded events, shown in the editor.
+enum RawEventInfo {
+    static func label(type: UInt32, data: Data) -> String {
+        let ev = MAHEventCreateFromData(data as CFData)
+        let loc = ev.map { "(\(Int($0.location.x)), \(Int($0.location.y)))" } ?? ""
+        switch type {
+        case 1: return "left click ↓ \(loc)"
+        case 2: return "left click ↑ \(loc)"
+        case 3: return "right click ↓ \(loc)"
+        case 4: return "right click ↑ \(loc)"
+        case 25: return "middle click ↓ \(loc)"
+        case 26: return "middle click ↑ \(loc)"
+        case 5: return "move \(loc)"
+        case 6, 7, 27: return "drag \(loc)"
+        case 10, 11:
+            let code = ev.map {
+                UInt16($0.getIntegerValueField(.keyboardEventKeycode))
+            } ?? 0
+            return "key \(type == 10 ? "↓" : "↑") \(KeyNames.name(for: code))"
+        case 12:
+            let code = ev.map {
+                UInt16($0.getIntegerValueField(.keyboardEventKeycode))
+            } ?? 0
+            return "modifier \(KeyNames.name(for: code))"
+        case 22:
+            let dy = ev?.getIntegerValueField(.scrollWheelEventDeltaAxis1) ?? 0
+            let dx = ev?.getIntegerValueField(.scrollWheelEventDeltaAxis2) ?? 0
+            return "scroll (\(dx), \(dy))"
+        case 18: return "rotate gesture"
+        case 19: return "gesture begin"
+        case 20: return "gesture end"
+        case 29: return "trackpad gesture"
+        case 30: return "pinch gesture"
+        case 31: return "swipe gesture"
+        case 32: return "smart zoom"
+        case 34: return "pressure"
+        default: return "event \(type)"
+        }
+    }
+}
+
+// Persists macros as individual JSON files in Application Support.
 @MainActor
 final class MacroStore: ObservableObject {
     @Published private(set) var macros: [Macro] = []
@@ -89,7 +248,9 @@ final class MacroStore: ObservableObject {
                 found.append(m)
             }
         }
-        macros = found.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        macros = found.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
     }
 
     func upsert(_ macro: Macro) {
@@ -97,7 +258,6 @@ final class MacroStore: ObservableObject {
             macros[i] = macro
         } else {
             macros.append(macro)
-            macros.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         }
         persist(macro)
     }
@@ -136,8 +296,9 @@ enum KeyNames {
         30: "]", 31: "O", 32: "U", 33: "[", 34: "I", 35: "P", 36: "↩",
         37: "L", 38: "J", 39: "'", 40: "K", 41: ";", 42: "\\", 43: ",",
         44: "/", 45: "N", 46: "M", 47: ".", 48: "⇥", 49: "Space",
-        50: "`", 51: "⌫", 53: "⎋", 96: "F5", 97: "F6", 98: "F7",
-        99: "F3", 100: "F8", 101: "F9", 103: "F11", 109: "F10",
+        50: "`", 51: "⌫", 53: "⎋", 54: "⌘", 55: "⌘", 56: "⇧", 57: "⇪",
+        58: "⌥", 59: "⌃", 60: "⇧", 61: "⌥", 62: "⌃", 96: "F5", 97: "F6",
+        98: "F7", 99: "F3", 100: "F8", 101: "F9", 103: "F11", 109: "F10",
         111: "F12", 118: "F4", 120: "F2", 122: "F1", 123: "←",
         124: "→", 125: "↓", 126: "↑",
     ]

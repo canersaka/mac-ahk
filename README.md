@@ -48,7 +48,15 @@ not your terminal, then relaunch the app.
   any keys still held down get released so nothing sticks.
 - **Hotkeys**: right-click a macro → *Set Hotkey…* and press a combo.
   Hotkeys work globally while the app runs, even with the window closed
-  (it lives in the menu bar).
+  (it lives in the menu bar). There's also a **record hotkey** (set it in
+  the status bar) that starts *and* stops recording from anywhere — its
+  own keystrokes are filtered out of the recording.
+- **Step editor**: every macro is an editable list of steps. Drag steps
+  to reorder, select one and hit − to delete it, or hit ＋ to insert any
+  action by hand: clicks (single/double/triple, any button), key
+  presses, typed text, scrolls, pointer moves, and waits. Each step's
+  delay is editable. *New Macro* in the sidebar starts from an empty
+  list, no recording needed.
 - Macros are plain JSON in `~/Library/Application Support/MacAHK/`.
 
 ## About the Mac App Store
