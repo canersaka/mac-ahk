@@ -1,77 +1,84 @@
-# mac-ahk
+# MacAHK
 
-A small macro recorder for macOS. Record your mouse clicks and keystrokes
-with their real timing, save them as named macros, replay them on a loop at
-any speed, and bind them to global hotkeys.
+A native macOS macro recorder. Record everything you do — keystrokes,
+clicks, drags, scrolls (with momentum), and trackpad gestures — then
+replay it on a loop, at any speed, from a hotkey, the menu bar, or the
+app window.
 
-Think "the 20% of AutoHotkey people actually use", without the scripting
-language, and without installing anything invasive: no kernel extensions,
-no background daemons, no login items, no screen recording permission.
-It's one Python file and one dependency, and nothing runs unless the app
-is open.
+The design goal is *minimally invasive*: no kernel extensions, no
+background daemons, no login items, no screen recording. It uses exactly
+the two permissions macOS defines for this job (Input Monitoring to
+record, Accessibility to replay) and nothing runs unless the app is open.
 
-## Install
+## What makes it different
+
+Most macro tools interpret your input ("click at 200,300"). MacAHK
+serializes the **raw CGEvent** — the actual bytes the window server saw —
+and replays them verbatim. That means:
+
+- scroll events keep their pixel deltas, phases, and momentum
+- drags replay as real drags, not teleporting clicks
+- trackpad gestures (pinch, rotate, swipe, smart-zoom, pressure) are
+  captured, not dropped
+- keystrokes keep exact modifier and repeat state
+
+## Build the app
+
+You need a Mac with the Xcode command line tools
+(`xcode-select --install`). Then:
 
 ```
-pip3 install pynput --break-system-packages
+cd MacAHK
+./build_app.sh
 ```
 
-Then grant your terminal app (Terminal, iTerm, etc.) two permissions under
-**System Settings → Privacy & Security**:
-
-- **Accessibility** — required to synthesize clicks and keystrokes
-- **Input Monitoring** — required to record them
-
-You only do this once. If recording silently captures nothing or playback
-does nothing, it's almost always a missing permission — toggle it off and
-on again and restart the terminal.
+That produces `MacAHK.app` — move it to /Applications and open it. First
+launch will walk you through the two permission grants (both point at
+System Settings → Privacy & Security). Grant them **to MacAHK itself**,
+not your terminal, then relaunch the app.
 
 ## Use
 
-```
-python3 mac_ahk.py
-```
+- **Record** (toolbar or menu bar): 3-second countdown, do your thing,
+  **Esc** to finish, name it. Interactions with the MacAHK window itself
+  are automatically excluded from recordings.
+- **Play**: select a macro and hit Play, double-click it, use the menu
+  bar item, or press its hotkey. Loops (0 = forever) and 0.25×–4× speed
+  are in the macro's detail pane. **Esc always aborts instantly**, and
+  any keys still held down get released so nothing sticks.
+- **Hotkeys**: right-click a macro → *Set Hotkey…* and press a combo.
+  Hotkeys work globally while the app runs, even with the window closed
+  (it lives in the menu bar).
+- Macros are plain JSON in `~/Library/Application Support/MacAHK/`.
 
-- **Record** starts a 3-second countdown (so you can switch to the target
-  window), then captures everything you do. Press **Esc** to finish, give
-  the macro a name, done. Clicks on the mac-ahk window itself are filtered
-  out of the recording.
-- **Play** replays the selected macro (double-clicking a macro also plays
-  it). Set the loop count (0 = repeat forever) and drag the speed slider
-  from 0.25× to 4×. **Esc aborts playback at any moment**, even mid-loop.
-- **Hotkey…** binds a global key combo to the selected macro, so you can
-  fire it while the app sits in the background.
-- The status bar shows a live cursor position readout, useful for checking
-  coordinates.
-- Optionally tick **Capture mouse movement** to record the full cursor
-  path (smoother, more human playback, bigger macro files). Off by
-  default — clicks jump straight to their target.
+## About the Mac App Store
 
-Macros are plain JSON in `~/.mac-ahk/`, so you can inspect them, edit
-timings by hand, or check them into a dotfiles repo.
-
-## CLI
-
-For cron jobs or scripting:
+An app in this category cannot be sold on the Mac App Store — App Store
+apps are sandboxed, and the sandbox forbids both global input monitoring
+and posting synthetic input to other apps. That's an Apple platform rule,
+not a limitation of this code; it's why Keyboard Maestro, BetterTouchTool
+and Hammerspoon all ship as direct downloads. To distribute MacAHK the
+same way they do, sign with a Developer ID certificate and notarize:
 
 ```
-python3 mac_ahk.py list
-python3 mac_ahk.py play "my macro" --loops 10 --speed 1.5
+SIGN_ID="Developer ID Application: Your Name (TEAMID)" ./build_app.sh
+ditto -c -k --keepParent MacAHK.app MacAHK.zip
+xcrun notarytool submit MacAHK.zip --keychain-profile <profile> --wait
+xcrun stapler staple MacAHK.app
 ```
 
-## Safety notes
+## Known limits
 
-- Esc is a hard stop for both recording and playback.
-- Playback releases any keys still held down when it ends, so an aborted
-  run can't leave a modifier stuck.
-- Keystrokes typed into password fields are not recordable — macOS Secure
-  Input blocks all listeners there by design. Don't put passwords in
-  macros anyway.
+- Replayed trackpad gestures are posted back through the window server;
+  most apps honor them, but apps that read raw multitouch data directly
+  from the trackpad driver will ignore synthetic gestures. There is no
+  public API that can do better.
+- macOS Secure Input blocks recording in password fields, by design.
+- Permissions are tied to the app's code signature: after rebuilding
+  from source you may need to re-toggle the grants in System Settings.
 
-## Limits (honesty section)
+## Script version
 
-This replays input as *you*, into whatever is focused on screen. It does
-not click buttons in background windows, read pixels, or wait for UI state
-— those need the Accessibility tree or screen capture, which is exactly
-the invasive surface this tool avoids. If you outgrow it, look at
-Hammerspoon or Keyboard Maestro.
+The original single-file Python version (records clicks/keys with
+timing, GUI, CLI playback) still lives at `mac_ahk.py` — handy if you
+want something hackable. The native app supersedes it.
