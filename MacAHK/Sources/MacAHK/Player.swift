@@ -138,12 +138,14 @@ final class Player {
 
     // Poll until the condition holds, the timeout passes (0 = no
     // timeout), or playback is aborted. Real-world waiting: unaffected
-    // by the speed multiplier.
+    // by the speed multiplier. Pixel conditions capture the screen each
+    // check, so they poll gently.
     private func waitUntil(_ condition: Condition, timeout: Double) {
+        let interval = condition.kind.isPixelBased ? 0.25 : 0.03
         let deadline = timeout > 0
             ? Date().addingTimeInterval(timeout) : Date.distantFuture
         while !aborted && !condition.holds() && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.03)
+            Thread.sleep(forTimeInterval: interval)
         }
     }
 

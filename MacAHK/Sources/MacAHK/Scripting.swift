@@ -407,6 +407,21 @@ enum ScriptParser {
             return Condition(kind: .pointerIn, negated: negated,
                              x: numbers[0], y: numbers[1],
                              w: numbers[2], h: numbers[3])
+        case "pixel":
+            // pixel <x> <y> <#rrggbb> [tolerance%]
+            guard rest.count >= 3,
+                  let px = Double(rest[0]), let py = Double(rest[1])
+            else { return nil }
+            let hex = rest[2].replacingOccurrences(of: "#", with: "")
+            guard hex.count == 6, let value = UInt32(hex, radix: 16)
+            else { return nil }
+            let tol = rest.count >= 4 ? (Double(rest[3]) ?? 12) : 12
+            return Condition(kind: .pixelColor, negated: negated,
+                             x: px, y: py,
+                             r: Int((value >> 16) & 0xFF),
+                             g: Int((value >> 8) & 0xFF),
+                             b: Int(value & 0xFF),
+                             tolerance: tol)
         default:
             return nil
         }
@@ -442,8 +457,12 @@ enum ScriptParser {
                 }
             }
             if let c = item.condition {
-                lines.append((c.negated ? "onlyifnot " : "onlyif ")
-                             + conditionText(c))
+                if c.kind == .regionLooksLike {
+                    lines.append("; [snapshot condition on the step above can't be scripted — re-add it in the editor]")
+                } else {
+                    lines.append((c.negated ? "onlyifnot " : "onlyif ")
+                                 + conditionText(c))
+                }
             }
         }
         return lines.joined(separator: "\n")
@@ -470,6 +489,9 @@ enum ScriptParser {
         case .wait:
             return "; (wait step — its time is the sleep above)"
         case .waitUntil(let condition, let timeout):
+            if condition.kind == .regionLooksLike {
+                return "; [waituntil with a snapshot condition can't be scripted — re-add it in the editor]"
+            }
             var s = "waituntil " + (condition.negated ? "not " : "")
                 + conditionText(condition)
             if timeout > 0 { s += ", \(trim(timeout))" }
@@ -497,6 +519,10 @@ enum ScriptParser {
             return "mods \(parts.joined(separator: "+"))"
         case .pointerIn:
             return "region \(Int(c.x)) \(Int(c.y)) \(Int(c.w)) \(Int(c.h))"
+        case .pixelColor:
+            return "pixel \(Int(c.x)) \(Int(c.y)) \(c.hexColor) \(trim(c.tolerance))"
+        case .regionLooksLike:
+            return "region-snapshot"  // placeholder; handled by export()
         }
     }
 

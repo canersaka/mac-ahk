@@ -56,10 +56,12 @@ struct RepeatSpec: Codable, Equatable {
 
 // A live check against the real world, evaluated at playback time.
 // Powers per-step "only if", the Wait Until action, and conditional
-// jumps ("go to step 3 while F6 is held").
-struct Condition: Codable, Equatable {
+// jumps ("go to step 3 while F6 is held"). The pixel kinds look at the
+// actual screen and need the Screen Recording permission.
+struct Condition: Equatable {
     enum Kind: String, Codable, CaseIterable, Identifiable {
         case keyHeld, mouseHeld, modifiersHeld, pointerIn
+        case pixelColor, regionLooksLike
         var id: String { rawValue }
 
         var title: String {
@@ -68,7 +70,14 @@ struct Condition: Codable, Equatable {
             case .mouseHeld: return "mouse button is held"
             case .modifiersHeld: return "modifiers are held"
             case .pointerIn: return "pointer is in region"
+            case .pixelColor: return "pixel color matches"
+            case .regionLooksLike: return "area looks like snapshot"
             }
+        }
+
+        // Screen captures are ~ms-expensive; pollers back off for these.
+        var isPixelBased: Bool {
+            self == .pixelColor || self == .regionLooksLike
         }
     }
 
@@ -81,6 +90,15 @@ struct Condition: Codable, Equatable {
     var y: Double = 0
     var w: Double = 0
     var h: Double = 0
+    // Pixel conditions: target color, match tolerance in percent, and
+    // the reference snapshot (PNG) for regionLooksLike.
+    var r: Int = 0
+    var g: Int = 0
+    var b: Int = 0
+    var tolerance: Double = 12
+    var reference: Data?
+
+    var hexColor: String { String(format: "#%02X%02X%02X", r, g, b) }
 
     var label: String {
         let what: String
@@ -93,13 +111,17 @@ struct Condition: Codable, Equatable {
             what = "\(Hotkey.symbols(for: NSEvent.ModifierFlags(rawValue: modifiers))) held"
         case .pointerIn:
             what = "pointer in (\(Int(x)), \(Int(y)), \(Int(w))×\(Int(h)))"
+        case .pixelColor:
+            what = "pixel (\(Int(x)), \(Int(y))) ≈ \(hexColor)"
+        case .regionLooksLike:
+            what = "area (\(Int(x)), \(Int(y)), \(Int(w))×\(Int(h))) matches snapshot"
         }
         return (negated ? "if not " : "if ") + what
     }
 
-    // Polls actual hardware/session state via public CG APIs.
+    // Polls actual hardware/session/screen state via public CG APIs.
     func holds() -> Bool {
-        let result: Bool
+        var result = false
         switch kind {
         case .keyHeld:
             result = CGEventSource.keyState(.combinedSessionState,
@@ -115,11 +137,70 @@ struct Condition: Codable, Equatable {
             if let loc = CGEvent(source: nil)?.location {
                 result = loc.x >= x && loc.x <= x + w
                     && loc.y >= y && loc.y <= y + h
-            } else {
-                result = false
+            }
+        case .pixelColor:
+            if let px = ScreenSampler.pixelRGB(at: CGPoint(x: x, y: y)) {
+                let tol = Int(tolerance / 100.0 * 255.0)
+                result = abs(px.r - r) <= tol && abs(px.g - g) <= tol
+                    && abs(px.b - b) <= tol
+            }
+        case .regionLooksLike:
+            if let ref = reference,
+               let refImage = ScreenSampler.image(fromPNG: ref),
+               let current = ScreenSampler.capture(
+                   rect: CGRect(x: x, y: y, width: w, height: h)),
+               let diff = ScreenSampler.difference(refImage, current) {
+                result = diff <= tolerance / 100.0
             }
         }
         return negated ? !result : result
+    }
+}
+
+// Codable by hand: every field decodes with a default, so macros saved
+// before a field existed keep loading.
+extension Condition: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case kind, negated, keyCode, button, modifiers, x, y, w, h
+        case r, g, b, tolerance, reference
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try c.decodeIfPresent(Kind.self, forKey: .kind) ?? .keyHeld
+        negated = try c.decodeIfPresent(Bool.self, forKey: .negated) ?? false
+        keyCode = try c.decodeIfPresent(UInt16.self, forKey: .keyCode) ?? 0
+        button = try c.decodeIfPresent(MouseButtonKind.self,
+                                       forKey: .button) ?? .left
+        modifiers = try c.decodeIfPresent(UInt.self, forKey: .modifiers) ?? 0
+        x = try c.decodeIfPresent(Double.self, forKey: .x) ?? 0
+        y = try c.decodeIfPresent(Double.self, forKey: .y) ?? 0
+        w = try c.decodeIfPresent(Double.self, forKey: .w) ?? 0
+        h = try c.decodeIfPresent(Double.self, forKey: .h) ?? 0
+        r = try c.decodeIfPresent(Int.self, forKey: .r) ?? 0
+        g = try c.decodeIfPresent(Int.self, forKey: .g) ?? 0
+        b = try c.decodeIfPresent(Int.self, forKey: .b) ?? 0
+        tolerance = try c.decodeIfPresent(Double.self,
+                                          forKey: .tolerance) ?? 12
+        reference = try c.decodeIfPresent(Data.self, forKey: .reference)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(negated, forKey: .negated)
+        try c.encode(keyCode, forKey: .keyCode)
+        try c.encode(button, forKey: .button)
+        try c.encode(modifiers, forKey: .modifiers)
+        try c.encode(x, forKey: .x)
+        try c.encode(y, forKey: .y)
+        try c.encode(w, forKey: .w)
+        try c.encode(h, forKey: .h)
+        try c.encode(r, forKey: .r)
+        try c.encode(g, forKey: .g)
+        try c.encode(b, forKey: .b)
+        try c.encode(tolerance, forKey: .tolerance)
+        try c.encodeIfPresent(reference, forKey: .reference)
     }
 }
 

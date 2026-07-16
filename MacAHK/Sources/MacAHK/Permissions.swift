@@ -11,6 +11,10 @@ enum Permissions {
 
     static var inputMonitoring: Bool { CGPreflightListenEventAccess() }
 
+    // Screen Recording is opt-in: only pixel/snapshot conditions use it,
+    // so it's not part of allGranted and is never requested at launch.
+    static var screenRecording: Bool { CGPreflightScreenCaptureAccess() }
+
     static var allGranted: Bool { accessibility && inputMonitoring }
 
     static func requestAccessibility() {
@@ -21,6 +25,14 @@ enum Permissions {
 
     static func requestInputMonitoring() {
         CGRequestListenEventAccess()
+    }
+
+    static func requestScreenRecording() {
+        CGRequestScreenCaptureAccess()
+    }
+
+    static func openScreenRecordingSettings() {
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
     }
 
     static func openAccessibilitySettings() {

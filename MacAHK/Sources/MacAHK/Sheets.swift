@@ -83,6 +83,10 @@ struct ConditionModel {
     var button: MouseButtonKind = .left
     var cmd = false, opt = false, ctrl = false, shift = false
     var x = 0.0, y = 0.0, w = 100.0, h = 100.0
+    var r = 0, g = 0, b = 0
+    var colorPicked = false
+    var tolerance = 12.0
+    var reference: Data?
 
     init() {}
 
@@ -97,6 +101,10 @@ struct ConditionModel {
         ctrl = f.contains(.control)
         shift = f.contains(.shift)
         x = c.x; y = c.y; w = c.w; h = c.h
+        r = c.r; g = c.g; b = c.b
+        colorPicked = c.kind == .pixelColor
+        tolerance = c.tolerance
+        reference = c.reference
     }
 
     var modifiersRaw: UInt {
@@ -112,6 +120,8 @@ struct ConditionModel {
         switch kind {
         case .keyHeld: return key != nil
         case .modifiersHeld: return modifiersRaw != 0
+        case .pixelColor: return colorPicked
+        case .regionLooksLike: return reference != nil
         default: return true
         }
     }
@@ -120,7 +130,9 @@ struct ConditionModel {
         guard valid else { return nil }
         return Condition(kind: kind, negated: negated,
                          keyCode: key?.keyCode ?? 0, button: button,
-                         modifiers: modifiersRaw, x: x, y: y, w: w, h: h)
+                         modifiers: modifiersRaw, x: x, y: y, w: w, h: h,
+                         r: r, g: g, b: b, tolerance: tolerance,
+                         reference: kind == .regionLooksLike ? reference : nil)
     }
 }
 
@@ -165,7 +177,10 @@ struct ConditionFields: View {
                 .toggleStyle(.button)
             }
         case .pointerIn:
-            LabeledContent("Top-left") {
+            regionFields
+        case .pixelColor:
+            screenRecordingRow
+            LabeledContent("Pixel") {
                 HStack(spacing: 6) {
                     NumberField(value: $model.x)
                     Text("×").foregroundStyle(.tertiary)
@@ -173,23 +188,128 @@ struct ConditionFields: View {
                 }
             }
             LabeledContent("") {
-                CaptureCursorButton(label: "Set top-left from cursor (2s)") {
-                    model.x = $0.x
-                    model.y = $0.y
+                CaptureCursorButton(label: "Pick pixel under cursor (2s)") {
+                    point in
+                    model.x = point.x
+                    model.y = point.y
+                    if let px = ScreenSampler.pixelRGB(at: point) {
+                        model.r = px.r
+                        model.g = px.g
+                        model.b = px.b
+                        model.colorPicked = true
+                    }
                 }
             }
-            LabeledContent("Size") {
-                HStack(spacing: 6) {
-                    NumberField(value: $model.w)
-                    Text("×").foregroundStyle(.tertiary)
-                    NumberField(value: $model.h)
+            LabeledContent("Color") {
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color(red: Double(model.r) / 255,
+                                    green: Double(model.g) / 255,
+                                    blue: Double(model.b) / 255))
+                        .frame(width: 28, height: 18)
+                        .overlay(RoundedRectangle(cornerRadius: 4)
+                            .stroke(.quaternary))
+                    Text(model.colorPicked
+                         ? String(format: "#%02X%02X%02X",
+                                  model.r, model.g, model.b)
+                         : "not picked yet")
+                        .font(.body.monospaced())
+                        .foregroundStyle(model.colorPicked
+                                         ? .primary : .secondary)
+                }
+            }
+            toleranceRow(max: 40)
+        case .regionLooksLike:
+            screenRecordingRow
+            regionFields
+            LabeledContent("Snapshot") {
+                HStack(spacing: 8) {
+                    if let data = model.reference,
+                       let img = NSImage(data: data) {
+                        Image(nsImage: img)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: 72, maxHeight: 44)
+                            .overlay(RoundedRectangle(cornerRadius: 4)
+                                .stroke(.quaternary))
+                    }
+                    CaptureCursorButton(
+                        label: model.reference == nil
+                            ? "Capture snapshot of area (2s)"
+                            : "Recapture (2s)") { _ in
+                        let rect = CGRect(x: model.x, y: model.y,
+                                          width: max(model.w, 1),
+                                          height: max(model.h, 1))
+                        if let img = ScreenSampler.capture(rect: rect),
+                           let png = ScreenSampler.png(img) {
+                            model.reference = png
+                        }
+                    }
                 }
             }
             LabeledContent("") {
-                CaptureCursorButton(label: "Set bottom-right from cursor (2s)") {
-                    model.w = max(1, $0.x - model.x)
-                    model.h = max(1, $0.y - model.y)
+                Text("Set the area first, arrange the screen how it should look, then capture. Playback compares the live area against this snapshot.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            toleranceRow(max: 30)
+        }
+    }
+
+    @ViewBuilder
+    private var regionFields: some View {
+        LabeledContent("Top-left") {
+            HStack(spacing: 6) {
+                NumberField(value: $model.x)
+                Text("×").foregroundStyle(.tertiary)
+                NumberField(value: $model.y)
+            }
+        }
+        LabeledContent("") {
+            CaptureCursorButton(label: "Set top-left from cursor (2s)") {
+                model.x = $0.x
+                model.y = $0.y
+            }
+        }
+        LabeledContent("Size") {
+            HStack(spacing: 6) {
+                NumberField(value: $model.w)
+                Text("×").foregroundStyle(.tertiary)
+                NumberField(value: $model.h)
+            }
+        }
+        LabeledContent("") {
+            CaptureCursorButton(label: "Set bottom-right from cursor (2s)") {
+                model.w = max(1, $0.x - model.x)
+                model.h = max(1, $0.y - model.y)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var screenRecordingRow: some View {
+        if !Permissions.screenRecording {
+            LabeledContent("Permission") {
+                Button("Grant Screen Recording…") {
+                    Permissions.requestScreenRecording()
+                    Permissions.openScreenRecordingSettings()
                 }
+            }
+            LabeledContent("") {
+                Text("Pixel conditions read the screen, which needs the Screen Recording permission (only used for these checks). Relaunch MacAHK after granting.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private func toleranceRow(max maxValue: Double) -> some View {
+        LabeledContent("Tolerance") {
+            HStack(spacing: 8) {
+                Slider(value: $model.tolerance, in: 0...maxValue)
+                    .frame(width: 140)
+                Text(String(format: "%.0f%%", model.tolerance))
+                    .font(.callout.monospacedDigit())
             }
         }
     }

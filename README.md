@@ -59,6 +59,17 @@ not your terminal, then relaunch the app.
   list, no recording needed.
 - Macros are plain JSON in `~/Library/Application Support/MacAHK/`.
 
+## Pixel conditions
+
+Steps, `waituntil`, and jumps can react to what's on screen: **pixel
+color matches** (hover the cursor to pick a point and its color) and
+**area looks like snapshot** (frame a region, capture a reference image,
+playback compares live pixels against it with a tolerance slider). This
+is the one feature that needs the **Screen Recording** permission — it's
+requested only when you actually add a pixel condition, never at launch,
+and it's used for nothing else. In scripts: `onlyif pixel 100 200
+#FF8800 10` or `waituntil pixel 100 200 #00FF00, 30`.
+
 ## About the Mac App Store
 
 An app in this category cannot be sold on the Mac App Store — App Store
