@@ -28,7 +28,12 @@ final class AppState: ObservableObject {
     }
     @Published var status = "Ready."
     @Published var draft: DraftRecording?
-    @Published var selection: UUID?
+    // Sidebar selection. Shift/cmd-click selects several macros for bulk
+    // actions; the editor opens when exactly one is selected.
+    @Published var selectedMacros: Set<UUID> = []
+    var selection: UUID? {
+        selectedMacros.count == 1 ? selectedMacros.first : nil
+    }
     // Live playback position, for highlighting the current step in the
     // editor while its macro plays.
     @Published var playingMacroID: UUID?
@@ -187,7 +192,7 @@ final class AppState: ObservableObject {
         store.upsert(macro)
         hotkeys.rebuild(from: store.macros)
         self.draft = nil
-        selection = macro.id
+        selectedMacros = [macro.id]
         status = "Saved “\(name)”."
     }
 
@@ -195,7 +200,7 @@ final class AppState: ObservableObject {
         guard let draft, let target = draft.appendTarget else { return }
         modify(target.id) { $0.items.append(contentsOf: draft.items) }
         self.draft = nil
-        selection = target.id
+        selectedMacros = [target.id]
         status = "Added \(draft.items.count) steps to “\(target.name)”."
     }
 
@@ -248,7 +253,7 @@ final class AppState: ObservableObject {
     func createEmptyMacro() {
         let macro = Macro(name: "New Macro", items: [])
         store.upsert(macro)
-        selection = macro.id
+        selectedMacros = [macro.id]
         status = "Created an empty macro — add steps with the ＋ button."
     }
 
@@ -257,14 +262,25 @@ final class AppState: ObservableObject {
         let macro = Macro(name: name, hotkey: hotkey, items: items)
         store.upsert(macro)
         hotkeys.rebuild(from: store.macros)
-        selection = macro.id
+        selectedMacros = [macro.id]
         status = "Imported “\(name)” with \(items.count) steps."
     }
 
     func delete(_ macro: Macro) {
         store.delete(macro)
         hotkeys.rebuild(from: store.macros)
+        selectedMacros.remove(macro.id)
         status = "Deleted “\(macro.name)”."
+    }
+
+    func deleteMacros(_ ids: Set<UUID>) {
+        let doomed = store.macros.filter { ids.contains($0.id) }
+        for m in doomed { store.delete(m) }
+        hotkeys.rebuild(from: store.macros)
+        selectedMacros.subtract(ids)
+        status = doomed.count == 1
+            ? "Deleted “\(doomed[0].name)”."
+            : "Deleted \(doomed.count) macros."
     }
 
     // Apply an edit to a stored macro and persist it.
@@ -303,6 +319,18 @@ final class AppState: ObservableObject {
             copy.id = UUID()
             m.items.insert(copy, at: i + 1)
         }
+    }
+
+    func duplicateSteps(_ stepIDs: Set<UUID>, in id: UUID) {
+        for stepID in stepIDs { duplicateStep(stepID, in: id) }
+        status = "Duplicated \(stepIDs.count) steps."
+    }
+
+    func deleteSteps(_ stepIDs: Set<UUID>, in id: UUID) {
+        modify(id) { m in
+            m.items.removeAll { stepIDs.contains($0.id) }
+        }
+        status = "Deleted \(stepIDs.count) step\(stepIDs.count == 1 ? "" : "s")."
     }
 
     // Turn a raw recorded press into its fully editable action, removing

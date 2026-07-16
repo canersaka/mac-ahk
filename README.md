@@ -19,7 +19,7 @@ Most macro tools interpret your input ("click at 200,300"). MacAHK serializes th
 
 **Playback.** Play from the app, the menu bar, or a per-macro global hotkey. Loops (0 means forever) and 0.25x to 4x speed. Esc always aborts instantly (checked straight from the keyboard state, so it works no matter which app is frontmost), and any keys still held down get released so nothing sticks. With the macro's editor open, the step being executed is highlighted live and kept in view.
 
-**Step editor.** Every macro is an editable list of steps. Drag to reorder, double-click to edit, duplicate, delete. Editing a step can also change what it does entirely — recorded events included, via the "Replace with" dropdown. Add any action by hand:
+**Step editor.** Every macro is an editable list of steps. Drag to reorder, double-click to edit, duplicate, delete. Shift-click or cmd-click selects several steps (or several macros in the sidebar) — right-click the selection to duplicate or delete them all at once. Editing a step can also change what it does entirely — recorded events included, via the "Replace with" dropdown. Add any action by hand:
 
 - clicks (single/double/triple, any button), pointer moves, scrolls
 - mouse press-and-hold and release as separate steps, for hand-built drags (press, move pointer, release)

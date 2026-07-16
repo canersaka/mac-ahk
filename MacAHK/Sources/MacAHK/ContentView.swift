@@ -46,7 +46,7 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            List(selection: $app.selection) {
+            List(selection: $app.selectedMacros) {
                 if !Permissions.allGranted {
                     PermissionsBanner()
                 }
@@ -68,22 +68,37 @@ struct ContentView: View {
                         }
                         .tag(m.id)
                         .contextMenu {
-                            Button("Play") { app.play(m) }
-                            Button("Set Hotkey…") { capturingHotkeyFor = m }
-                            if m.hotkey != nil {
-                                Button("Clear Hotkey") {
-                                    app.setHotkey(nil, for: m)
+                            // Right-clicking inside a multi-selection
+                            // targets the whole selection; outside it,
+                            // just this row.
+                            let targets = app.selectedMacros.contains(m.id)
+                                ? app.selectedMacros : Set([m.id])
+                            if targets.count > 1 {
+                                Button("Delete \(targets.count) Macros",
+                                       role: .destructive) {
+                                    app.deleteMacros(targets)
                                 }
-                            }
-                            Divider()
-                            Button("Copy as Script") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(
-                                    ScriptParser.export(m), forType: .string)
-                            }
-                            Divider()
-                            Button("Delete", role: .destructive) {
-                                app.delete(m)
+                            } else {
+                                Button("Play") { app.play(m) }
+                                Button("Set Hotkey…") {
+                                    capturingHotkeyFor = m
+                                }
+                                if m.hotkey != nil {
+                                    Button("Clear Hotkey") {
+                                        app.setHotkey(nil, for: m)
+                                    }
+                                }
+                                Divider()
+                                Button("Copy as Script") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(
+                                        ScriptParser.export(m),
+                                        forType: .string)
+                                }
+                                Divider()
+                                Button("Delete", role: .destructive) {
+                                    app.delete(m)
+                                }
                             }
                         }
                     }
@@ -133,12 +148,34 @@ struct ContentView: View {
                          title: "Playing “\(name)”",
                          subtitle: "Loop \(loop) of \(total > 0 ? String(total) : "∞") — press Esc to stop.")
             }
+        } else if app.selectedMacros.count > 1 {
+            multiSelectionPage
         } else if let m = app.store.macro(id: app.selection) {
             MacroEditor(macro: m, capturingHotkeyFor: $capturingHotkeyFor)
                 .id(m.id)
         } else {
             homePage
         }
+    }
+
+    // Shown when several macros are selected in the sidebar.
+    private var multiSelectionPage: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "square.stack.3d.up")
+                .font(.system(size: 44))
+                .foregroundStyle(.secondary)
+            Text("\(app.selectedMacros.count) macros selected")
+                .font(.title3.bold())
+            Text("Right-click the selection in the sidebar, or:")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Button(role: .destructive) {
+                app.deleteMacros(app.selectedMacros)
+            } label: {
+                Label("Delete Selected", systemImage: "trash")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // The main page: shown when nothing is selected.
@@ -203,11 +240,11 @@ struct ContentView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .navigation) {
             Button {
-                app.selection = nil
+                app.selectedMacros = []
             } label: {
                 Label("Home", systemImage: "house")
             }
-            .disabled(app.selection == nil)
+            .disabled(app.selectedMacros.isEmpty)
             .help("Back to the main page")
 
             Button {
@@ -293,12 +330,24 @@ struct MacroEditor: View {
     let macro: Macro
     @Binding var capturingHotkeyFor: Macro?
     @State private var name: String = ""
-    @State private var stepSelection: UUID?
+    @State private var stepSelection = Set<UUID>()
     @State private var addingAction = false
     @State private var editingStep: MacroItem?
 
     // Always read the live copy from the store so edits show immediately.
     private var current: Macro { app.store.macro(id: macro.id) ?? macro }
+
+    // New actions insert after the last selected step (or at the end).
+    private var insertAnchor: UUID? {
+        current.items.last { stepSelection.contains($0.id) }?.id
+    }
+
+    // The single selected step, when exactly one is selected.
+    private var soleSelection: MacroItem? {
+        guard stepSelection.count == 1, let id = stepSelection.first
+        else { return nil }
+        return current.items.first { $0.id == id }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -311,7 +360,7 @@ struct MacroEditor: View {
         .onAppear { name = macro.name }
         .sheet(isPresented: $addingAction) {
             AddActionSheet { item in
-                app.insertStep(item, into: macro.id, after: stepSelection)
+                app.insertStep(item, into: macro.id, after: insertAnchor)
             }
         }
         .sheet(item: $editingStep) { item in
@@ -424,19 +473,33 @@ struct MacroEditor: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { editingStep = item }
         .contextMenu {
-            Button("Edit…") { editingStep = item }
-            Button("Duplicate") {
-                app.duplicateStep(item.id, in: macro.id)
-            }
-            if item.convertedAction != nil {
-                Button("Convert to Editable Action") {
-                    app.convertStepToAction(item.id, in: macro.id)
+            // Right-clicking inside a multi-selection targets the whole
+            // selection; outside it, just this row.
+            let targets = stepSelection.contains(item.id)
+                ? stepSelection : Set([item.id])
+            if targets.count > 1 {
+                Button("Duplicate \(targets.count) Steps") {
+                    app.duplicateSteps(targets, in: macro.id)
                 }
-            }
-            Divider()
-            Button("Delete", role: .destructive) {
-                app.modify(macro.id) { m in
-                    m.items.removeAll { $0.id == item.id }
+                Divider()
+                Button("Delete \(targets.count) Steps", role: .destructive) {
+                    app.deleteSteps(targets, in: macro.id)
+                    stepSelection.subtract(targets)
+                }
+            } else {
+                Button("Edit…") { editingStep = item }
+                Button("Duplicate") {
+                    app.duplicateStep(item.id, in: macro.id)
+                }
+                if item.convertedAction != nil {
+                    Button("Convert to Editable Action") {
+                        app.convertStepToAction(item.id, in: macro.id)
+                    }
+                }
+                Divider()
+                Button("Delete", role: .destructive) {
+                    app.deleteSteps([item.id], in: macro.id)
+                    stepSelection.remove(item.id)
                 }
             }
         }
@@ -466,32 +529,29 @@ struct MacroEditor: View {
             .help("Add an action after the selected step (or at the end)")
 
             Button {
-                if let sel = stepSelection {
-                    app.modify(macro.id) { m in
-                        m.items.removeAll { $0.id == sel }
-                    }
-                    stepSelection = nil
+                if !stepSelection.isEmpty {
+                    app.deleteSteps(stepSelection, in: macro.id)
+                    stepSelection = []
                 }
             } label: {
                 Image(systemName: "minus")
             }
-            .disabled(stepSelection == nil)
-            .help("Remove the selected step")
+            .disabled(stepSelection.isEmpty)
+            .help(stepSelection.count > 1
+                  ? "Remove the \(stepSelection.count) selected steps"
+                  : "Remove the selected step")
 
             Button {
-                if let sel = stepSelection,
-                   let item = current.items.first(where: { $0.id == sel }) {
-                    editingStep = item
-                }
+                if let item = soleSelection { editingStep = item }
             } label: {
                 Image(systemName: "pencil")
             }
-            .disabled(stepSelection == nil)
+            .disabled(soleSelection == nil)
             .help("Edit the selected step (delay, repeat, condition, parameters)")
 
             Spacer()
 
-            Text("Double-click or right-click a step to edit it · drag to reorder")
+            Text("Double-click a step to edit · shift-click to select a range · drag to reorder")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
 
