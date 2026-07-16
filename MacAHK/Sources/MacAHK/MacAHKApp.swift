@@ -8,6 +8,19 @@ struct MacAHKApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(app)
+                .onAppear {
+                    // Fire the TCC request calls up front: this makes
+                    // macOS add MacAHK to the Input Monitoring and
+                    // Accessibility lists automatically, so granting is
+                    // just flipping a toggle — no hunting with the +
+                    // button in System Settings.
+                    if !Permissions.inputMonitoring {
+                        Permissions.requestInputMonitoring()
+                    }
+                    if !Permissions.accessibility {
+                        Permissions.requestAccessibility()
+                    }
+                }
         }
 
         // Quick access while the main window is closed; the app keeps

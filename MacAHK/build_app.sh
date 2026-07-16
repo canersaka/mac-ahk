@@ -18,6 +18,16 @@ for arg in "$@"; do
     case "$arg" in
         --no-install) INSTALL=0 ;;
         --dmg) MAKE_DMG=1 ;;
+        --reset-perms)
+            # Clears stale permission entries left behind by rebuilds
+            # (ad-hoc signatures change every build, and macOS sometimes
+            # keeps a dead entry that a toggle can't revive). After this,
+            # launch the app and grant fresh.
+            tccutil reset Accessibility com.canersaka.macahk || true
+            tccutil reset ListenEvent com.canersaka.macahk || true
+            echo "Permission entries cleared. Launch MacAHK and re-grant."
+            exit 0
+            ;;
     esac
 done
 

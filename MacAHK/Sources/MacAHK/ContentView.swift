@@ -723,7 +723,7 @@ struct PermissionsBanner: View {
                     Permissions.openAccessibilitySettings()
                 }
             }
-            Text("Recording needs Input Monitoring; playback needs Accessibility. Relaunch after granting.")
+            Text("MacAHK is already in both lists — just flip its toggle on (macOS will ask for your password or Touch ID), then relaunch. If a toggle seems stuck after an update, run ./build_app.sh --reset-perms and grant fresh.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
