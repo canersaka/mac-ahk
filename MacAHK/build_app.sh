@@ -1,14 +1,25 @@
 #!/bin/bash
-# Builds MacAHK.app from source. Requires Xcode command line tools:
-#   xcode-select --install
+# Builds MacAHK.app and installs it into /Applications.
+# Requires Xcode command line tools:  xcode-select --install
 #
 # Usage:
-#   ./build_app.sh                 ad-hoc signed, for your own Mac
+#   ./build_app.sh                 build + install to /Applications
+#   ./build_app.sh --no-install    build only, leave MacAHK.app here
+#   ./build_app.sh --dmg           also produce MacAHK.dmg for sharing
 #   SIGN_ID="Developer ID Application: Your Name (TEAMID)" ./build_app.sh
 #                                  properly signed, for distribution
 
 set -euo pipefail
 cd "$(dirname "$0")"
+
+INSTALL=1
+MAKE_DMG=0
+for arg in "$@"; do
+    case "$arg" in
+        --no-install) INSTALL=0 ;;
+        --dmg) MAKE_DMG=1 ;;
+    esac
+done
 
 VERSION="1.0"
 APP="MacAHK.app"
@@ -52,9 +63,32 @@ else
     codesign --force --sign - "$APP"
 fi
 
+if [ "$INSTALL" = 1 ]; then
+    echo "Installing to /Applications…"
+    # Quit a running copy so the executable isn't busy during replace.
+    osascript -e 'tell application "MacAHK" to quit' >/dev/null 2>&1 || true
+    sleep 1
+    rm -rf "/Applications/$APP"
+    cp -R "$APP" /Applications/
+    echo "Installed: /Applications/$APP"
+fi
+
+if [ "$MAKE_DMG" = 1 ]; then
+    echo "Creating MacAHK.dmg…"
+    STAGE="$(mktemp -d)"
+    cp -R "$APP" "$STAGE/"
+    ln -s /Applications "$STAGE/Applications"
+    rm -f MacAHK.dmg
+    hdiutil create -volname MacAHK -srcfolder "$STAGE" -ov \
+        -format UDZO MacAHK.dmg >/dev/null
+    rm -rf "$STAGE"
+    echo "Created: $(pwd)/MacAHK.dmg"
+    echo "(For sharing beyond your own Macs, sign with SIGN_ID and"
+    echo " notarize, or recipients will fight Gatekeeper.)"
+fi
+
 echo
-echo "Done: $(pwd)/$APP"
-echo "Move it to /Applications and open it."
+echo "Done."
 echo
 echo "Note: macOS ties permissions to the app's signature. After a"
 echo "rebuild you may need to re-toggle MacAHK in System Settings >"

@@ -32,7 +32,7 @@ cd MacAHK
 ./build_app.sh
 ```
 
-That produces `MacAHK.app` — move it to /Applications and open it. First
+That builds the app and installs it straight into /Applications (use `--no-install` to skip that, or `--dmg` to also produce a shareable disk image). First
 launch will walk you through the two permission grants (both point at
 System Settings → Privacy & Security). Grant them **to MacAHK itself**,
 not your terminal, then relaunch the app.
