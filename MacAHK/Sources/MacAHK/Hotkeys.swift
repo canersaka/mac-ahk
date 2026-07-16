@@ -61,16 +61,18 @@ final class HotkeyCenter {
             .intersection(.deviceIndependentFlagsMask)
             .intersection([.command, .option, .control, .shift])
 
+        // Key auto-repeat must not re-fire a hotkey while it's held, but
+        // matching combos still get swallowed so they don't type.
         if let rec = recordHotkey,
            rec.keyCode == event.keyCode && rec.flags == mods {
-            onRecordToggle?()
+            if !event.isARepeat { onRecordToggle?() }
             return true
         }
 
         guard enabled else { return false }
         for b in bindings
         where b.hotkey.keyCode == event.keyCode && b.hotkey.flags == mods {
-            onTrigger?(b.id)
+            if !event.isARepeat { onTrigger?(b.id) }
             return true
         }
         return false

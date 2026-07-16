@@ -61,11 +61,22 @@ final class AppState: ObservableObject {
     private let hotstrings = HotstringCenter()
     private var countdownTask: Task<Void, Never>?
     private var appendCandidateID: UUID?
+    // The keypress that stops a recording also reaches the hotkey
+    // monitors moments later; toggles inside this window are that echo.
+    private var recordToggleBlockedUntil = Date.distantPast
     private static let recordHotkeyDefaultsKey = "recordHotkey"
     private static let hotstringsEnabledKey = "hotstringsEnabled"
 
     init() {
-        recorder.onEscape = { [weak self] in self?.stopAll() }
+        recorder.onEscape = { [weak self] in
+            guard let self else { return }
+            // The keypress stopping the recording reaches the hotkey
+            // monitors after this handler has already stopped it and
+            // re-enabled them; without this window, stopping via the
+            // record hotkey instantly starts a fresh recording.
+            self.recordToggleBlockedUntil = Date().addingTimeInterval(0.4)
+            self.stopAll()
+        }
         hotkeys.onTrigger = { [weak self] id in
             guard let self, let m = self.store.macro(id: id) else { return }
             self.play(m)
@@ -102,6 +113,7 @@ final class AppState: ObservableObject {
     // MARK: recording
 
     func toggleRecording() {
+        guard Date() >= recordToggleBlockedUntil else { return }
         if mode == .idle {
             beginRecording()
         } else if isRecordingOrCounting {
