@@ -240,6 +240,11 @@ final class AppState: ObservableObject {
         modify(macro.id) { $0.name = name }
     }
 
+    // While a sheet is teaching a new combo, hotkeys must not fire.
+    func suspendHotkeys(_ suspended: Bool) {
+        hotkeys.captureSuspended = suspended
+    }
+
     private func persistRecordHotkey() {
         if let hk = recordHotkey, let data = try? JSONEncoder().encode(hk) {
             UserDefaults.standard.set(data,

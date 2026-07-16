@@ -1,21 +1,26 @@
 import Foundation
 import AppKit
 
-// Global hotkey dispatch via an NSEvent global monitor. This piggybacks
-// on the Input Monitoring permission the recorder already needs, so no
-// extra frameworks or permissions are involved.
+// Global hotkey dispatch. Two monitors are needed because macOS splits
+// the world: the global monitor sees keystrokes typed into OTHER apps,
+// the local monitor sees keystrokes typed into MacAHK itself. Without
+// the local one, hotkeys silently die whenever our own window is
+// focused.
 //
 // Macro hotkeys are suppressed while recording or playing (a macro must
 // not retrigger itself); the record hotkey stays live always, since its
-// whole point is toggling recording from anywhere.
+// whole point is toggling recording from anywhere. Everything is
+// suppressed while a capture sheet is teaching a new combo.
 @MainActor
 final class HotkeyCenter {
     var enabled = true
+    var captureSuspended = false
     var onTrigger: ((UUID) -> Void)?
     var onRecordToggle: (() -> Void)?
     var recordHotkey: Hotkey?
 
-    private var monitor: Any?
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
     private var bindings: [(hotkey: Hotkey, id: UUID)] = []
 
     func rebuild(from macros: [Macro]) {
@@ -24,23 +29,34 @@ final class HotkeyCenter {
             return (hk, m.id)
         }
         let needed = !bindings.isEmpty || recordHotkey != nil
-        if monitor == nil && needed {
-            monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) {
-                [weak self] event in
-                self?.handle(event)
+        if needed {
+            if globalMonitor == nil {
+                globalMonitor = NSEvent.addGlobalMonitorForEvents(
+                    matching: .keyDown) { [weak self] event in
+                    _ = self?.handle(event)
+                }
             }
-        } else if !needed, let m = monitor {
-            NSEvent.removeMonitor(m)
-            monitor = nil
+            if localMonitor == nil {
+                localMonitor = NSEvent.addLocalMonitorForEvents(
+                    matching: .keyDown) { [weak self] event in
+                    (self?.handle(event) ?? false) ? nil : event
+                }
+            }
+        } else {
+            shutdown()
         }
     }
 
     func shutdown() {
-        if let m = monitor { NSEvent.removeMonitor(m) }
-        monitor = nil
+        if let m = globalMonitor { NSEvent.removeMonitor(m) }
+        if let m = localMonitor { NSEvent.removeMonitor(m) }
+        globalMonitor = nil
+        localMonitor = nil
     }
 
-    private func handle(_ event: NSEvent) {
+    // Returns true when the event matched a hotkey and was acted on.
+    private func handle(_ event: NSEvent) -> Bool {
+        guard !captureSuspended else { return false }
         let mods = event.modifierFlags
             .intersection(.deviceIndependentFlagsMask)
             .intersection([.command, .option, .control, .shift])
@@ -48,14 +64,15 @@ final class HotkeyCenter {
         if let rec = recordHotkey,
            rec.keyCode == event.keyCode && rec.flags == mods {
             onRecordToggle?()
-            return
+            return true
         }
 
-        guard enabled else { return }
+        guard enabled else { return false }
         for b in bindings
         where b.hotkey.keyCode == event.keyCode && b.hotkey.flags == mods {
             onTrigger?(b.id)
-            return
+            return true
         }
+        return false
     }
 }

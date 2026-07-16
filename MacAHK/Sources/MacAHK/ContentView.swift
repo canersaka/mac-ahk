@@ -30,7 +30,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $capturingRecordHotkey) {
             HotkeyCaptureSheet(
-                title: "Start/stop recording hotkey",
+                title: "Recording hotkey (starts and stops recording)",
                 allowClear: app.recordHotkey != nil,
                 onCapture: { hk in app.recordHotkey = hk })
         }
@@ -217,8 +217,8 @@ struct ContentView: View {
                 capturingRecordHotkey = true
             } label: {
                 Label(
-                    app.recordHotkey.map { "Record: \($0.display)" }
-                        ?? "Set record hotkey…",
+                    app.recordHotkey.map { "Recording hotkey: \($0.display)" }
+                        ?? "Set recording hotkey…",
                     systemImage: "record.circle")
                 .font(.callout)
             }
@@ -417,6 +417,7 @@ struct AddActionSheet: View {
     }
 
     let onAdd: (ManualAction, Double) -> Void
+    @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
 
     @State private var kind: Kind = .click
@@ -434,32 +435,44 @@ struct AddActionSheet: View {
     @State private var captureCountdown: Int?
 
     var body: some View {
-        VStack(spacing: 14) {
-            Text("Add Action").font(.headline)
-            Picker("Action", selection: $kind) {
-                ForEach(Kind.allCases) { k in Text(k.rawValue).tag(k) }
-            }
-            .pickerStyle(.segmented)
+        VStack(spacing: 0) {
+            Text("Add Action")
+                .font(.headline)
+                .padding(.top, 18)
+                .padding(.bottom, 10)
 
             Form {
+                Picker("Action", selection: $kind) {
+                    ForEach(Kind.allCases) { k in Text(k.rawValue).tag(k) }
+                }
+                .pickerStyle(.menu)
+
                 fields
+
                 LabeledContent("Delay before (s)") {
-                    TextField("Delay", value: $delay,
+                    TextField("", value: $delay,
                               format: .number.precision(.fractionLength(0...3)))
+                        .labelsHidden()
+                        .multilineTextAlignment(.trailing)
                         .frame(width: 80)
                 }
             }
-            .formStyle(.columns)
+            .formStyle(.grouped)
+            .scrollDisabled(true)
 
             HStack {
                 Button("Cancel", role: .cancel) { cleanup(); dismiss() }
+                Spacer()
                 Button("Add", action: add)
                     .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
                     .disabled(!valid)
             }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 18)
         }
-        .padding(20)
-        .frame(width: 400)
+        .frame(width: 460)
+        .fixedSize(horizontal: false, vertical: true)
         .onDisappear { cleanup() }
     }
 
@@ -468,67 +481,81 @@ struct AddActionSheet: View {
         switch kind {
         case .click, .movePointer:
             LabeledContent("Position") {
-                HStack {
-                    TextField("x", value: $x, format: .number)
-                        .frame(width: 70)
-                    TextField("y", value: $y, format: .number)
-                        .frame(width: 70)
-                    Button(captureCountdown.map { "…\($0)" }
-                           ?? "Capture cursor in 2s") {
-                        captureCursorSoon()
-                    }
-                    .disabled(captureCountdown != nil)
+                HStack(spacing: 6) {
+                    TextField("", value: $x, format: .number)
+                        .labelsHidden()
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 64)
+                    Text("×").foregroundStyle(.tertiary)
+                    TextField("", value: $y, format: .number)
+                        .labelsHidden()
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 64)
                 }
+            }
+            LabeledContent("") {
+                Button(captureCountdown.map { "capturing in \($0)…" }
+                       ?? "Use my cursor position (2s countdown)") {
+                    captureCursorSoon()
+                }
+                .disabled(captureCountdown != nil)
             }
             if kind == .click {
-                LabeledContent("Button") {
-                    Picker("", selection: $button) {
-                        ForEach(MouseButtonKind.allCases) { b in
-                            Text(b.rawValue).tag(b)
-                        }
+                Picker("Button", selection: $button) {
+                    ForEach(MouseButtonKind.allCases) { b in
+                        Text(b.rawValue).tag(b)
                     }
-                    .labelsHidden()
-                    .frame(width: 100)
                 }
-                LabeledContent("Clicks") {
-                    Picker("", selection: $clickCount) {
-                        Text("single").tag(1)
-                        Text("double").tag(2)
-                        Text("triple").tag(3)
-                    }
-                    .labelsHidden()
-                    .frame(width: 100)
+                .pickerStyle(.menu)
+                Picker("Clicks", selection: $clickCount) {
+                    Text("single").tag(1)
+                    Text("double").tag(2)
+                    Text("triple").tag(3)
                 }
+                .pickerStyle(.menu)
             }
         case .keyPress:
-            LabeledContent("Key") {
-                Button(capturedKey?.display
-                       ?? (capturingKey ? "press keys…" : "click, then press keys")) {
+            LabeledContent("Key combo") {
+                Button {
                     startKeyCapture()
+                } label: {
+                    Text(capturedKey?.display
+                         ?? (capturingKey ? "press keys now…"
+                                          : "click, then press keys"))
+                        .font(.body.monospaced())
+                        .frame(minWidth: 150)
                 }
-                .font(.body.monospaced())
             }
         case .typeText:
             LabeledContent("Text") {
                 TextField("text to type", text: $text)
-                    .frame(width: 240)
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
             }
         case .scroll:
-            LabeledContent("Amount (px)") {
-                HStack {
-                    TextField("dx", value: $scrollDX, format: .number)
-                        .frame(width: 70)
-                    TextField("dy", value: $scrollDY, format: .number)
-                        .frame(width: 70)
-                }
+            LabeledContent("Horizontal (px)") {
+                TextField("", value: $scrollDX, format: .number)
+                    .labelsHidden()
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 80)
             }
-            Text("Negative dy scrolls down, positive scrolls up.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            LabeledContent("Vertical (px)") {
+                TextField("", value: $scrollDY, format: .number)
+                    .labelsHidden()
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 80)
+            }
+            LabeledContent("") {
+                Text("Negative vertical scrolls down, positive scrolls up.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         case .wait:
-            Text("Waits for the delay below, then moves on.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            LabeledContent("") {
+                Text("Waits for the delay below, then moves on.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -587,6 +614,7 @@ struct AddActionSheet: View {
     private func startKeyCapture() {
         guard keyMonitor == nil else { return }
         capturingKey = true
+        app.suspendHotkeys(true)
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
             let mods = e.modifierFlags
                 .intersection(.deviceIndependentFlagsMask)
@@ -601,6 +629,7 @@ struct AddActionSheet: View {
         if let m = keyMonitor { NSEvent.removeMonitor(m) }
         keyMonitor = nil
         capturingKey = false
+        app.suspendHotkeys(false)
     }
 }
 
@@ -656,6 +685,7 @@ struct HotkeyCaptureSheet: View {
     let title: String
     let allowClear: Bool
     let onCapture: (Hotkey?) -> Void
+    @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var monitor: Any?
     @State private var preview = "Press a key combo…"
@@ -675,6 +705,7 @@ struct HotkeyCaptureSheet: View {
         }
         .padding(24)
         .onAppear {
+            app.suspendHotkeys(true)
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
                 handle(e)
                 return nil  // swallow the keystroke
@@ -683,6 +714,7 @@ struct HotkeyCaptureSheet: View {
         .onDisappear {
             if let m = monitor { NSEvent.removeMonitor(m) }
             monitor = nil
+            app.suspendHotkeys(false)
         }
     }
 
