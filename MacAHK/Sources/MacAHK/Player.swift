@@ -75,6 +75,7 @@ final class Player {
                      progress: @escaping (Int, Int) -> Void,
                      onStep: @escaping (Int) -> Void) -> Bool {
         var heldKeys = Set<Int64>()
+        var heldButtons = Set<MouseButtonKind>()
         var loop = 0
         var stopped = false
 
@@ -124,13 +125,15 @@ final class Player {
                     if stopped { break }
                 }
 
-                runRepeated(item, speed: speed, held: &heldKeys)
+                runRepeated(item, speed: speed, heldKeys: &heldKeys,
+                            heldButtons: &heldButtons)
                 i += 1
             }
             if loops > 0 && loop >= loops { break }
         }
 
         releaseHeld(heldKeys)
+        releaseHeldButtons(heldButtons)
         let wasAborted = aborted
         stateLock.lock()
         isPlaying = false
@@ -148,11 +151,12 @@ final class Player {
     }
 
     private func runRepeated(_ item: MacroItem, speed: Double,
-                             held: inout Set<Int64>) {
+                             heldKeys: inout Set<Int64>,
+                             heldButtons: inout Set<MouseButtonKind>) {
         let count = max(1, item.repeats?.count ?? 1)
         for n in 0..<count {
             if aborted { return }
-            execute(item, held: &held)
+            execute(item, heldKeys: &heldKeys, heldButtons: &heldButtons)
             if n < count - 1, let spec = item.repeats {
                 sleepInterruptibly(spec.nextInterval() / speed)
             }
@@ -172,12 +176,14 @@ final class Player {
         }
     }
 
-    private func execute(_ item: MacroItem, held: inout Set<Int64>) {
+    private func execute(_ item: MacroItem, heldKeys: inout Set<Int64>,
+                         heldButtons: inout Set<MouseButtonKind>) {
         switch item.payload {
         case .raw(let type, let data):
             guard let event = MAHEventCreateFromData(data as CFData)
             else { return }
-            trackHeldKeys(type: type, event: event, held: &held)
+            trackHeldKeys(type: type, event: event, held: &heldKeys)
+            trackHeldButtons(type: type, held: &heldButtons)
             suppressEscIfNeeded(type: type, event: event)
             // The serialized bytes keep their record-time timestamp;
             // stale stamps trip up double-click detection and event
@@ -192,13 +198,14 @@ final class Player {
             }
             event.post(tap: .cghidEventTap)
         case .action(let action):
-            perform(action)
+            perform(action, heldButtons: &heldButtons)
         }
     }
 
     // MARK: synthesized actions
 
-    private func perform(_ action: ManualAction) {
+    private func perform(_ action: ManualAction,
+                         heldButtons: inout Set<MouseButtonKind>) {
         let src = CGEventSource(stateID: .combinedSessionState)
         switch action {
         case .wait:
@@ -214,18 +221,42 @@ final class Player {
             let pt = CGPoint(x: x, y: y)
             settleCursor(at: pt)
             for i in 1...max(count, 1) {
-                for (type, _) in [(button.downType, true),
-                                  (button.upType, false)] {
-                    guard let e = CGEvent(
-                        mouseEventSource: src, mouseType: type,
-                        mouseCursorPosition: pt,
-                        mouseButton: button.cgButton) else { continue }
-                    e.setIntegerValueField(.mouseEventClickState,
-                                           value: Int64(i))
-                    e.post(tap: .cghidEventTap)
+                if let down = CGEvent(
+                    mouseEventSource: src, mouseType: button.downType,
+                    mouseCursorPosition: pt,
+                    mouseButton: button.cgButton) {
+                    down.setIntegerValueField(.mouseEventClickState,
+                                              value: Int64(i))
+                    down.post(tap: .cghidEventTap)
+                }
+                // Real presses last tens of milliseconds; an instant
+                // release gets dropped by some apps.
+                Thread.sleep(forTimeInterval: 0.03)
+                if let up = CGEvent(
+                    mouseEventSource: src, mouseType: button.upType,
+                    mouseCursorPosition: pt,
+                    mouseButton: button.cgButton) {
+                    up.setIntegerValueField(.mouseEventClickState,
+                                            value: Int64(i))
+                    up.post(tap: .cghidEventTap)
                 }
                 if count > 1 { Thread.sleep(forTimeInterval: 0.08) }
             }
+
+        case .mouseDown(let x, let y, let button):
+            let pt = CGPoint(x: x, y: y)
+            settleCursor(at: pt)
+            CGEvent(mouseEventSource: src, mouseType: button.downType,
+                    mouseCursorPosition: pt, mouseButton: button.cgButton)?
+                .post(tap: .cghidEventTap)
+            heldButtons.insert(button)
+
+        case .mouseUp(let x, let y, let button):
+            CGEvent(mouseEventSource: src, mouseType: button.upType,
+                    mouseCursorPosition: CGPoint(x: x, y: y),
+                    mouseButton: button.cgButton)?
+                .post(tap: .cghidEventTap)
+            heldButtons.remove(button)
 
         case .keyPress(let code, let modifiers):
             if code == 53 { suppressEsc(for: 0.5) }
@@ -336,6 +367,33 @@ final class Player {
             let slice = min(remaining, 0.05)
             Thread.sleep(forTimeInterval: slice)
             remaining -= slice
+        }
+    }
+
+    // Mirror raw mouse presses/releases so a stop mid-drag doesn't leave
+    // a button stuck down.
+    private func trackHeldButtons(type: UInt32,
+                                  held: inout Set<MouseButtonKind>) {
+        switch type {
+        case 1: held.insert(.left)
+        case 3: held.insert(.right)
+        case 25: held.insert(.middle)
+        case 2: held.remove(.left)
+        case 4: held.remove(.right)
+        case 26: held.remove(.middle)
+        default: break
+        }
+    }
+
+    private func releaseHeldButtons(_ buttons: Set<MouseButtonKind>) {
+        guard !buttons.isEmpty else { return }
+        let src = CGEventSource(stateID: .combinedSessionState)
+        let loc = CGEvent(source: nil)?.location ?? .zero
+        for button in buttons {
+            CGEvent(mouseEventSource: src, mouseType: button.upType,
+                    mouseCursorPosition: loc,
+                    mouseButton: button.cgButton)?
+                .post(tap: .cghidEventTap)
         }
     }
 

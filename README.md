@@ -15,13 +15,14 @@ Most macro tools interpret your input ("click at 200,300"). MacAHK serializes th
 
 ## Feature tour
 
-**Recording.** Hit Record (toolbar, menu bar, or a global record hotkey you can set in the status bar), do your thing, press Esc to finish, name it. There is a 3 second countdown so you can switch to the target app, and anything you do inside the MacAHK window itself is excluded automatically. Optionally record the full mouse path, not just clicks.
+**Recording.** Hit Record (toolbar, menu bar, or a global record hotkey you can set in the status bar), do your thing, press Esc to finish, name it. There is a 3 second countdown so you can switch to the target app, and anything you do inside the MacAHK window itself is excluded automatically. Optionally record the full mouse path, not just clicks. Plain clicks are recorded as single editable Click steps (double/triple clicks included) rather than separate press/release events; drags, deliberate holds, force clicks and modifier-clicks keep the full raw detail.
 
 **Playback.** Play from the app, the menu bar, or a per-macro global hotkey. Loops (0 means forever) and 0.25x to 4x speed. Esc always aborts instantly (checked straight from the keyboard state, so it works no matter which app is frontmost), and any keys still held down get released so nothing sticks. With the macro's editor open, the step being executed is highlighted live and kept in view.
 
 **Step editor.** Every macro is an editable list of steps. Drag to reorder, double-click to edit, duplicate, delete. Editing a step can also change what it does entirely — recorded events included, via the "Replace with" dropdown. Add any action by hand:
 
 - clicks (single/double/triple, any button), pointer moves, scrolls
+- mouse press-and-hold and release as separate steps, for hand-built drags (press, move pointer, release)
 - key presses and typed text
 - open an app by name, bundle id, or path (activates it if already running)
 - open a URL in the default handler

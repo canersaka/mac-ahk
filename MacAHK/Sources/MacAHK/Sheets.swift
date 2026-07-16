@@ -400,6 +400,8 @@ struct IntField: View {
 struct ActionFormModel {
     enum ActionKind: String, CaseIterable, Identifiable {
         case click = "Click"
+        case mouseDown = "Mouse Press (hold)"
+        case mouseUp = "Mouse Release"
         case keyPress = "Key Press"
         case typeText = "Type Text"
         case scroll = "Scroll"
@@ -444,6 +446,10 @@ struct ActionFormModel {
         case .click(let ax, let ay, let abutton, let acount):
             kind = .click; x = ax; y = ay; button = abutton
             clickCount = acount
+        case .mouseDown(let ax, let ay, let abutton):
+            kind = .mouseDown; x = ax; y = ay; button = abutton
+        case .mouseUp(let ax, let ay, let abutton):
+            kind = .mouseUp; x = ax; y = ay; button = abutton
         case .movePointer(let ax, let ay):
             kind = .movePointer; x = ax; y = ay
         case .keyPress(let code, let mods):
@@ -502,6 +508,10 @@ struct ActionFormModel {
         case .click:
             return .click(x: x, y: y, button: button,
                           count: max(1, clickCount))
+        case .mouseDown:
+            return .mouseDown(x: x, y: y, button: button)
+        case .mouseUp:
+            return .mouseUp(x: x, y: y, button: button)
         case .movePointer:
             return .movePointer(x: x, y: y)
         case .keyPress:
@@ -546,7 +556,7 @@ struct ActionFields: View {
 
     var body: some View {
         switch model.kind {
-        case .click, .movePointer:
+        case .click, .movePointer, .mouseDown, .mouseUp:
             LabeledContent("Position") {
                 HStack(spacing: 6) {
                     NumberField(value: $model.x)
@@ -560,19 +570,28 @@ struct ActionFields: View {
                     model.y = $0.y
                 }
             }
-            if model.kind == .click {
+            if model.kind != .movePointer {
                 Picker("Button", selection: $model.button) {
                     ForEach(MouseButtonKind.allCases) { b in
                         Text(b.rawValue).tag(b)
                     }
                 }
                 .pickerStyle(.menu)
+            }
+            if model.kind == .click {
                 Picker("Clicks", selection: $model.clickCount) {
                     Text("single").tag(1)
                     Text("double").tag(2)
                     Text("triple").tag(3)
                 }
                 .pickerStyle(.menu)
+            }
+            if model.kind == .mouseDown {
+                LabeledContent("") {
+                    Text("Holds the button down until a later Mouse Release step (or the end of playback). Build a drag by hand: press, move pointer, release.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         case .keyPress:
             LabeledContent("Key combo") {

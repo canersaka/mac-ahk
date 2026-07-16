@@ -12,6 +12,8 @@ import SwiftUI
 //   F6::                     ; AHK hotkey label → becomes the macro hotkey
 //   ::btw::by the way        ; hotstring → system-wide text expansion
 //   click 100, 200           ; left click (also: click 100 200 right 2)
+//   mousedown 100, 200       ; press and hold (AHK `click 100 200 down`)
+//   mouseup 300, 400         ; release — press/move/release makes a drag
 //   mousemove 300, 400
 //   send Hello world{Enter}  ; types text; {Enter}/{Tab}/{Space} expand
 //   press cmd+shift+a        ; key combo (AHK ^!+# prefixes work too)
@@ -125,14 +127,52 @@ enum ScriptParser {
             var button: MouseButtonKind = head == "rightclick" ? .right
                 : head == "middleclick" ? .middle : .left
             var count = head == "doubleclick" ? 2 : 1
+            var pressOnly = false
+            var releaseOnly = false
+            for word in args where Double(word) == nil {
+                let w = word.lowercased()
+                if let b = MouseButtonKind(rawValue: w) {
+                    button = b
+                } else if w == "down" || w == "d" {   // AHK `Click Down`
+                    pressOnly = true
+                } else if w == "up" || w == "u" {     // AHK `Click Up`
+                    releaseOnly = true
+                }
+            }
+            if numbers.count >= 3 { count = max(1, Int(numbers[2])) }
+            if pressOnly {
+                append(.mouseDown(x: numbers[0], y: numbers[1],
+                                  button: button),
+                       to: &result, pendingDelay: &pendingDelay)
+            } else if releaseOnly {
+                append(.mouseUp(x: numbers[0], y: numbers[1],
+                                button: button),
+                       to: &result, pendingDelay: &pendingDelay)
+            } else {
+                append(.click(x: numbers[0], y: numbers[1], button: button,
+                              count: count),
+                       to: &result, pendingDelay: &pendingDelay)
+            }
+
+        case "mousedown", "clickdown", "mouseup", "clickup":
+            let numbers = args.compactMap { Double($0) }
+            guard numbers.count >= 2 else {
+                warn(&result, lineNo,
+                     "\(head) needs coordinates, e.g. `mousedown 100, 200` — line skipped")
+                return
+            }
+            var button: MouseButtonKind = .left
             for word in args where Double(word) == nil {
                 if let b = MouseButtonKind(rawValue: word.lowercased()) {
                     button = b
                 }
             }
-            if numbers.count >= 3 { count = max(1, Int(numbers[2])) }
-            append(.click(x: numbers[0], y: numbers[1], button: button,
-                          count: count),
+            let isDown = head == "mousedown" || head == "clickdown"
+            append(isDown
+                       ? .mouseDown(x: numbers[0], y: numbers[1],
+                                    button: button)
+                       : .mouseUp(x: numbers[0], y: numbers[1],
+                                  button: button),
                    to: &result, pendingDelay: &pendingDelay)
 
         case "mousemove", "move":
@@ -612,6 +652,14 @@ enum ScriptParser {
             var s = "click \(Int(x)), \(Int(y))"
             if button != .left || count > 1 { s += ", \(button.rawValue)" }
             if count > 1 { s += ", \(count)" }
+            return s
+        case .mouseDown(let x, let y, let button):
+            var s = "mousedown \(Int(x)), \(Int(y))"
+            if button != .left { s += ", \(button.rawValue)" }
+            return s
+        case .mouseUp(let x, let y, let button):
+            var s = "mouseup \(Int(x)), \(Int(y))"
+            if button != .left { s += ", \(button.rawValue)" }
             return s
         case .movePointer(let x, let y):
             return "mousemove \(Int(x)), \(Int(y))"

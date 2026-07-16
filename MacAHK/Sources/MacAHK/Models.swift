@@ -301,6 +301,8 @@ enum MouseButtonKind: String, Codable, CaseIterable, Identifiable {
 // control flow: they steer playback instead of producing input.
 enum ManualAction: Codable, Equatable {
     case click(x: Double, y: Double, button: MouseButtonKind, count: Int)
+    case mouseDown(x: Double, y: Double, button: MouseButtonKind)
+    case mouseUp(x: Double, y: Double, button: MouseButtonKind)
     case movePointer(x: Double, y: Double)
     case keyPress(keyCode: UInt16, modifiers: UInt)
     case typeText(text: String)
@@ -321,8 +323,13 @@ enum ManualAction: Codable, Equatable {
     var label: String {
         switch self {
         case .click(let x, let y, let button, let count):
-            let prefix = count == 2 ? "double " : count == 3 ? "triple " : ""
+            let prefix = count == 2 ? "double " : count == 3 ? "triple "
+                : count > 3 ? "\(count)× " : ""
             return "\(prefix)\(button.rawValue) click at (\(Int(x)), \(Int(y)))"
+        case .mouseDown(let x, let y, let button):
+            return "press and hold \(button.rawValue) at (\(Int(x)), \(Int(y)))"
+        case .mouseUp(let x, let y, let button):
+            return "release \(button.rawValue) at (\(Int(x)), \(Int(y)))"
         case .movePointer(let x, let y):
             return "move pointer to (\(Int(x)), \(Int(y)))"
         case .keyPress(let code, let mods):
@@ -451,18 +458,124 @@ extension Macro: Codable {
 
     // Convert a recording (absolute timestamps) into steps (relative
     // delays), dropping trailing modifier noise from the stop shortcut.
+    // Plain clicks coalesce into a single editable Click step per click
+    // (double/triple bursts included) instead of confusing press/release
+    // pairs. Drags, deliberate holds, force clicks and modifier-clicks
+    // keep the full raw event detail.
     static func items(from events: [RecordedEvent]) -> [MacroItem] {
         var evs = events
         while let last = evs.last, last.type == 12 { evs.removeLast() }
+
+        var items: [MacroItem] = []
         var prev = 0.0
-        return evs.map { e in
-            let item = MacroItem(
+        var i = 0
+        while i < evs.count {
+            let e = evs[i]
+            if let (action, consumed, endT) = coalescedClick(in: evs, at: i) {
+                items.append(MacroItem(delay: max(0, e.t - prev),
+                                       payload: .action(action),
+                                       label: action.label))
+                prev = endT
+                i += consumed
+                continue
+            }
+            items.append(MacroItem(
                 delay: max(0, e.t - prev),
                 payload: .raw(type: e.type, data: e.data),
-                label: RawEventInfo.label(type: e.type, data: e.data))
+                label: RawEventInfo.label(type: e.type, data: e.data)))
             prev = e.t
-            return item
+            i += 1
         }
+        return items
+    }
+
+    private static let clickMods: CGEventFlags = [
+        .maskCommand, .maskAlternate, .maskControl, .maskShift]
+
+    // Try to read a plain click — or a double/triple burst — starting at
+    // `start`. Returns the Click action, how many events it consumed and
+    // the timestamp of the last one. Returns nil for anything that isn't
+    // a plain click: real movement (a drag), a hold over 0.4s, modifier
+    // flags, or a force-click's pressure ramp — those all stay raw.
+    private static func coalescedClick(in evs: [RecordedEvent], at start: Int)
+        -> (ManualAction, Int, Double)? {
+        let pairs: [UInt32: (up: UInt32, drag: UInt32, btn: MouseButtonKind)] = [
+            1: (2, 6, .left), 3: (4, 7, .right), 25: (26, 27, .middle),
+        ]
+        guard let kinds = pairs[evs[start].type],
+              let firstDown = MAHEventCreateFromData(evs[start].data as CFData)
+        else { return nil }
+        let origin = firstDown.location
+
+        var count = 0
+        var expectedState: Int64 = 1
+        var lastT = evs[start].t
+        var i = start
+
+        while i < evs.count, evs[i].type == evs[start].type,
+              let down = MAHEventCreateFromData(evs[i].data as CFData) {
+            let state = down.getIntegerValueField(.mouseEventClickState)
+            if count == 0 {
+                // A burst must start at click #1; a stray later click of
+                // a double (e.g. after a modifier press) stays raw.
+                guard state <= 1 else { return nil }
+            } else {
+                guard state == expectedState,
+                      evs[i].t - lastT <= 0.5,
+                      near(down.location, origin, 5) else { break }
+            }
+            guard down.flags.isDisjoint(with: clickMods) else { break }
+
+            // Walk to the matching release, tolerating only cursor
+            // jitter and a little trackpad pressure noise. A force
+            // click's long pressure ramp fails the cap and stays raw.
+            var j = i + 1
+            var pressureNoise = 0
+            scan: while j < evs.count {
+                switch evs[j].type {
+                case 34 where pressureNoise < 6:
+                    pressureNoise += 1
+                    j += 1
+                case kinds.drag:
+                    guard let drag = MAHEventCreateFromData(
+                              evs[j].data as CFData),
+                          near(drag.location, origin, 3) else { break scan }
+                    j += 1
+                default:
+                    break scan
+                }
+            }
+            guard j < evs.count, evs[j].type == kinds.up,
+                  evs[j].t - evs[i].t <= 0.4,
+                  let up = MAHEventCreateFromData(evs[j].data as CFData),
+                  near(up.location, origin, 3)
+            else { break }
+
+            count += 1
+            expectedState = state + 1
+            lastT = evs[j].t
+            i = j + 1
+
+            // Peek past pressure noise between burst pairs, consuming it
+            // only when another matching down actually follows.
+            var k = i
+            var betweenNoise = 0
+            while k < evs.count, evs[k].type == 34, betweenNoise < 6 {
+                k += 1
+                betweenNoise += 1
+            }
+            if k < evs.count, evs[k].type == evs[start].type { i = k }
+        }
+
+        guard count > 0 else { return nil }
+        return (.click(x: origin.x, y: origin.y, button: kinds.btn,
+                       count: count),
+                i - start, lastT)
+    }
+
+    private static func near(_ a: CGPoint, _ b: CGPoint,
+                             _ tolerance: Double) -> Bool {
+        abs(a.x - b.x) <= tolerance && abs(a.y - b.y) <= tolerance
     }
 }
 
