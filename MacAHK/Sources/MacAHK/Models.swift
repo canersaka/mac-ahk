@@ -21,10 +21,105 @@ struct MacroItem: Codable, Identifiable, Equatable {
     var delay: Double
     var payload: Payload
     var label: String
+    // Run this step several times, with a fixed or randomized interval.
+    var repeats: RepeatSpec?
+    // Only run this step when the condition holds; otherwise skip it.
+    var condition: Condition?
 
     enum Payload: Codable, Equatable {
         case raw(type: UInt32, data: Data)
         case action(ManualAction)
+    }
+}
+
+struct RepeatSpec: Codable, Equatable {
+    var count: Int = 2
+    var minInterval: Double = 0.1
+    var maxInterval: Double = 0.1  // equal to min → fixed interval
+
+    var label: String {
+        if maxInterval > minInterval {
+            return String(format: "×%d (%.2f–%.2fs)", count,
+                          minInterval, maxInterval)
+        }
+        return String(format: "×%d (%.2fs)", count, minInterval)
+    }
+
+    var randomized: Bool { maxInterval > minInterval }
+
+    func nextInterval() -> Double {
+        let lo = max(0, min(minInterval, maxInterval))
+        let hi = max(minInterval, maxInterval)
+        return hi > lo ? Double.random(in: lo...hi) : lo
+    }
+}
+
+// A live check against the real world, evaluated at playback time.
+// Powers per-step "only if", the Wait Until action, and conditional
+// jumps ("go to step 3 while F6 is held").
+struct Condition: Codable, Equatable {
+    enum Kind: String, Codable, CaseIterable, Identifiable {
+        case keyHeld, mouseHeld, modifiersHeld, pointerIn
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .keyHeld: return "key is held"
+            case .mouseHeld: return "mouse button is held"
+            case .modifiersHeld: return "modifiers are held"
+            case .pointerIn: return "pointer is in region"
+            }
+        }
+    }
+
+    var kind: Kind = .keyHeld
+    var negated: Bool = false
+    var keyCode: UInt16 = 0
+    var button: MouseButtonKind = .left
+    var modifiers: UInt = 0
+    var x: Double = 0
+    var y: Double = 0
+    var w: Double = 0
+    var h: Double = 0
+
+    var label: String {
+        let what: String
+        switch kind {
+        case .keyHeld:
+            what = "\(KeyNames.name(for: keyCode)) held"
+        case .mouseHeld:
+            what = "\(button.rawValue) button held"
+        case .modifiersHeld:
+            what = "\(Hotkey.symbols(for: NSEvent.ModifierFlags(rawValue: modifiers))) held"
+        case .pointerIn:
+            what = "pointer in (\(Int(x)), \(Int(y)), \(Int(w))×\(Int(h)))"
+        }
+        return (negated ? "if not " : "if ") + what
+    }
+
+    // Polls actual hardware/session state via public CG APIs.
+    func holds() -> Bool {
+        let result: Bool
+        switch kind {
+        case .keyHeld:
+            result = CGEventSource.keyState(.combinedSessionState,
+                                            key: CGKeyCode(keyCode))
+        case .mouseHeld:
+            result = CGEventSource.buttonState(.combinedSessionState,
+                                               button: button.cgButton)
+        case .modifiersHeld:
+            let state = CGEventSource.flagsState(.combinedSessionState)
+            let need = Hotkey(keyCode: 0, modifiers: modifiers).cgFlags
+            result = state.contains(need)
+        case .pointerIn:
+            if let loc = CGEvent(source: nil)?.location {
+                result = loc.x >= x && loc.x <= x + w
+                    && loc.y >= y && loc.y <= y + h
+            } else {
+                result = false
+            }
+        }
+        return negated ? !result : result
     }
 }
 
@@ -57,7 +152,8 @@ enum MouseButtonKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-// Every action a user can add without recording.
+// Every action a user can add without recording. The last three are
+// control flow: they steer playback instead of producing input.
 enum ManualAction: Codable, Equatable {
     case click(x: Double, y: Double, button: MouseButtonKind, count: Int)
     case movePointer(x: Double, y: Double)
@@ -65,6 +161,9 @@ enum ManualAction: Codable, Equatable {
     case typeText(text: String)
     case scroll(dx: Int, dy: Int)
     case wait
+    case waitUntil(condition: Condition, timeout: Double)
+    case goTo(step: Int, times: Int)
+    case stopPlayback
 
     var label: String {
         switch self {
@@ -82,6 +181,16 @@ enum ManualAction: Codable, Equatable {
             return "scroll (\(dx), \(dy))"
         case .wait:
             return "wait"
+        case .waitUntil(let condition, let timeout):
+            var s = "wait until \(condition.label.dropFirst(3))"
+            if timeout > 0 { s += String(format: " (max %.1fs)", timeout) }
+            return s
+        case .goTo(let step, let times):
+            var s = "go to step \(step)"
+            if times > 0 { s += " (at most ×\(times))" }
+            return s
+        case .stopPlayback:
+            return "stop playback"
         }
     }
 }
@@ -102,12 +211,16 @@ struct Hotkey: Codable, Equatable {
     }
 
     var display: String {
+        Hotkey.symbols(for: flags) + KeyNames.name(for: keyCode)
+    }
+
+    static func symbols(for flags: NSEvent.ModifierFlags) -> String {
         var s = ""
         if flags.contains(.control) { s += "⌃" }
         if flags.contains(.option) { s += "⌥" }
         if flags.contains(.shift) { s += "⇧" }
         if flags.contains(.command) { s += "⌘" }
-        return s + KeyNames.name(for: keyCode)
+        return s
     }
 }
 
@@ -178,6 +291,61 @@ extension Macro: Codable {
             prev = e.t
             return item
         }
+    }
+}
+
+extension MacroItem {
+    // The editable equivalent of a raw recorded event, when one exists.
+    // Press-type events convert (their matching release is removed by
+    // the caller); releases, modifier transitions and gestures have no
+    // standalone editable form.
+    var convertedAction: ManualAction? {
+        guard case .raw(let type, let data) = payload,
+              let ev = MAHEventCreateFromData(data as CFData)
+        else { return nil }
+        switch type {
+        case 1, 3, 25:
+            let btn: MouseButtonKind =
+                type == 1 ? .left : type == 3 ? .right : .middle
+            return .click(x: ev.location.x, y: ev.location.y,
+                          button: btn, count: 1)
+        case 10:
+            let code = UInt16(ev.getIntegerValueField(.keyboardEventKeycode))
+            var mods: NSEvent.ModifierFlags = []
+            if ev.flags.contains(.maskCommand) { mods.insert(.command) }
+            if ev.flags.contains(.maskAlternate) { mods.insert(.option) }
+            if ev.flags.contains(.maskControl) { mods.insert(.control) }
+            if ev.flags.contains(.maskShift) { mods.insert(.shift) }
+            return .keyPress(keyCode: code, modifiers: mods.rawValue)
+        case 22:
+            return .scroll(
+                dx: Int(ev.getIntegerValueField(.scrollWheelEventDeltaAxis2)),
+                dy: Int(ev.getIntegerValueField(.scrollWheelEventDeltaAxis1)))
+        case 5, 6, 7, 27:
+            return .movePointer(x: ev.location.x, y: ev.location.y)
+        default:
+            return nil
+        }
+    }
+
+    // The raw event type of the matching release for a press-type raw
+    // event — used to clean up the pair when converting.
+    var pairedReleaseType: UInt32? {
+        guard case .raw(let type, _) = payload else { return nil }
+        switch type {
+        case 1: return 2
+        case 3: return 4
+        case 25: return 26
+        case 10: return 11
+        default: return nil
+        }
+    }
+
+    var rawKeyCode: UInt16? {
+        guard case .raw(_, let data) = payload,
+              let ev = MAHEventCreateFromData(data as CFData)
+        else { return nil }
+        return UInt16(ev.getIntegerValueField(.keyboardEventKeycode))
     }
 }
 

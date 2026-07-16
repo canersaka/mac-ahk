@@ -199,6 +199,15 @@ final class AppState: ObservableObject {
         status = "Created an empty macro — add steps with the ＋ button."
     }
 
+    func createMacro(named name: String, items: [MacroItem],
+                     hotkey: Hotkey?) {
+        let macro = Macro(name: name, hotkey: hotkey, items: items)
+        store.upsert(macro)
+        hotkeys.rebuild(from: store.macros)
+        selection = macro.id
+        status = "Imported “\(name)” with \(items.count) steps."
+    }
+
     func delete(_ macro: Macro) {
         store.delete(macro)
         hotkeys.rebuild(from: store.macros)
@@ -212,12 +221,8 @@ final class AppState: ObservableObject {
         store.upsert(m)
     }
 
-    func insertAction(_ action: ManualAction, delay: Double, into id: UUID,
-                      after selected: UUID?) {
+    func insertStep(_ item: MacroItem, into id: UUID, after selected: UUID?) {
         modify(id) { m in
-            let item = MacroItem(delay: max(0, delay),
-                                 payload: .action(action),
-                                 label: action.label)
             if let selected,
                let i = m.items.firstIndex(where: { $0.id == selected }) {
                 m.items.insert(item, at: i + 1)
@@ -225,7 +230,59 @@ final class AppState: ObservableObject {
                 m.items.append(item)
             }
         }
-        status = "Added: \(action.label)"
+        status = "Added: \(item.label)"
+    }
+
+    func replaceStep(_ item: MacroItem, in id: UUID) {
+        modify(id) { m in
+            if let i = m.items.firstIndex(where: { $0.id == item.id }) {
+                m.items[i] = item
+            }
+        }
+        status = "Updated: \(item.label)"
+    }
+
+    func duplicateStep(_ stepID: UUID, in id: UUID) {
+        modify(id) { m in
+            guard let i = m.items.firstIndex(where: { $0.id == stepID })
+            else { return }
+            var copy = m.items[i]
+            copy.id = UUID()
+            m.items.insert(copy, at: i + 1)
+        }
+    }
+
+    // Turn a raw recorded press into its fully editable action, removing
+    // the matching release event so the pair doesn't double-fire.
+    func convertStepToAction(_ stepID: UUID, in id: UUID) {
+        modify(id) { m in
+            guard let i = m.items.firstIndex(where: { $0.id == stepID }),
+                  let action = m.items[i].convertedAction else { return }
+            let original = m.items[i]
+            m.items[i].payload = .action(action)
+            m.items[i].label = action.label
+
+            if let releaseType = original.pairedReleaseType {
+                let keyCode = original.rawKeyCode
+                for j in (i + 1)..<m.items.count {
+                    guard case .raw(let t, _) = m.items[j].payload,
+                          t == releaseType else { continue }
+                    if releaseType == 11,
+                       let kc = keyCode, m.items[j].rawKeyCode != kc {
+                        continue
+                    }
+                    // Fold the removed step's delay into its successor so
+                    // overall timing stays intact.
+                    let removedDelay = m.items[j].delay
+                    if j + 1 < m.items.count {
+                        m.items[j + 1].delay += removedDelay
+                    }
+                    m.items.remove(at: j)
+                    break
+                }
+            }
+        }
+        status = "Converted to an editable action."
     }
 
     func setHotkey(_ hotkey: Hotkey?, for macro: Macro) {

@@ -4,6 +4,7 @@ struct ContentView: View {
     @EnvironmentObject var app: AppState
     @State private var capturingHotkeyFor: Macro?
     @State private var capturingRecordHotkey = false
+    @State private var importingScript = false
 
     var body: some View {
         // The status bar lives outside the navigation layout so it can
@@ -33,6 +34,9 @@ struct ContentView: View {
                 title: "Recording hotkey (starts and stops recording)",
                 allowClear: app.recordHotkey != nil,
                 onCapture: { hk in app.recordHotkey = hk })
+        }
+        .sheet(isPresented: $importingScript) {
+            ImportScriptSheet()
         }
     }
 
@@ -68,6 +72,12 @@ struct ContentView: View {
                                 }
                             }
                             Divider()
+                            Button("Copy as Script") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(
+                                    ScriptParser.export(m), forType: .string)
+                            }
+                            Divider()
                             Button("Delete", role: .destructive) {
                                 app.delete(m)
                             }
@@ -84,6 +94,13 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderless)
                 Spacer()
+                Button {
+                    importingScript = true
+                } label: {
+                    Label("Import Script", systemImage: "doc.text")
+                }
+                .buttonStyle(.borderless)
+                .help("Create a macro from a MacAHK or AutoHotkey script")
             }
             .padding(8)
         }
@@ -126,7 +143,7 @@ struct ContentView: View {
                     app.beginRecording()
                 } label: {
                     Label("Record a Macro", systemImage: "record.circle")
-                        .frame(width: 170)
+                        .frame(width: 160)
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
@@ -135,12 +152,20 @@ struct ContentView: View {
                     app.createEmptyMacro()
                 } label: {
                     Label("New Empty Macro", systemImage: "plus")
-                        .frame(width: 170)
+                        .frame(width: 160)
+                }
+                .controlSize(.large)
+
+                Button {
+                    importingScript = true
+                } label: {
+                    Label("Import Script", systemImage: "doc.text")
+                        .frame(width: 160)
                 }
                 .controlSize(.large)
             }
             if let hk = app.recordHotkey {
-                Text("Record hotkey: \(hk.display)")
+                Text("Recording hotkey: \(hk.display)")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -245,6 +270,7 @@ struct MacroEditor: View {
     @State private var name: String = ""
     @State private var stepSelection: UUID?
     @State private var addingAction = false
+    @State private var editingStep: MacroItem?
 
     // Always read the live copy from the store so edits show immediately.
     private var current: Macro { app.store.macro(id: macro.id) ?? macro }
@@ -259,10 +285,12 @@ struct MacroEditor: View {
         }
         .onAppear { name = macro.name }
         .sheet(isPresented: $addingAction) {
-            AddActionSheet { action, delay in
-                app.insertAction(action, delay: delay, into: macro.id,
-                                 after: stepSelection)
+            AddActionSheet { item in
+                app.insertStep(item, into: macro.id, after: stepSelection)
             }
+        }
+        .sheet(item: $editingStep) { item in
+            EditStepSheet(macroID: macro.id, item: item)
         }
     }
 
@@ -295,19 +323,7 @@ struct MacroEditor: View {
         List(selection: $stepSelection) {
             ForEach(Array(current.items.enumerated()), id: \.element.id) {
                 index, item in
-                HStack {
-                    Text("\(index + 1)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 32, alignment: .trailing)
-                    stepIcon(item)
-                    Text(item.label)
-                    Spacer()
-                    Text(String(format: "+%.2fs", item.delay))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                .tag(item.id)
+                stepRow(index: index, item: item)
             }
             .onMove { from, to in
                 app.modify(macro.id) { $0.items.move(fromOffsets: from,
@@ -318,8 +334,61 @@ struct MacroEditor: View {
             }
 
             if current.items.isEmpty {
-                Text("No steps yet. Use ＋ to add actions, or record on top of this macro's name.")
+                Text("No steps yet. Use ＋ to add actions, record with this macro selected to append, or import a script.")
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func stepRow(index: Int, item: MacroItem) -> some View {
+        HStack {
+            Text("\(index + 1)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 32, alignment: .trailing)
+            stepIcon(item)
+            Text(item.label)
+            if let cond = item.condition {
+                Text(cond.label)
+                    .font(.caption)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(.orange.opacity(0.18),
+                                in: RoundedRectangle(cornerRadius: 4))
+                    .foregroundStyle(.orange)
+            }
+            if let rep = item.repeats {
+                Text(rep.label)
+                    .font(.caption)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(.blue.opacity(0.15),
+                                in: RoundedRectangle(cornerRadius: 4))
+                    .foregroundStyle(.blue)
+            }
+            Spacer()
+            Text(String(format: "+%.2fs", item.delay))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .tag(item.id)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { editingStep = item }
+        .contextMenu {
+            Button("Edit…") { editingStep = item }
+            Button("Duplicate") {
+                app.duplicateStep(item.id, in: macro.id)
+            }
+            if item.convertedAction != nil {
+                Button("Convert to Editable Action") {
+                    app.convertStepToAction(item.id, in: macro.id)
+                }
+            }
+            Divider()
+            Button("Delete", role: .destructive) {
+                app.modify(macro.id) { m in
+                    m.items.removeAll { $0.id == item.id }
+                }
             }
         }
     }
@@ -330,11 +399,11 @@ struct MacroEditor: View {
         case .raw:
             Image(systemName: "waveform")
                 .foregroundStyle(.secondary)
-                .help("Recorded event (replayed verbatim)")
+                .help("Recorded event (replayed verbatim) — right-click to edit or convert")
         case .action:
             Image(systemName: "hammer")
                 .foregroundStyle(.blue)
-                .help("Manual action")
+                .help("Manual action — right-click or double-click to edit")
         }
     }
 
@@ -360,20 +429,20 @@ struct MacroEditor: View {
             .disabled(stepSelection == nil)
             .help("Remove the selected step")
 
-            if let sel = stepSelection,
-               current.items.contains(where: { $0.id == sel }) {
-                Divider().frame(height: 16)
-                Text("Delay before step (s):")
-                    .font(.callout)
-                TextField("Delay", value: delayBinding(for: sel),
-                          format: .number.precision(.fractionLength(0...3)))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 70)
+            Button {
+                if let sel = stepSelection,
+                   let item = current.items.first(where: { $0.id == sel }) {
+                    editingStep = item
+                }
+            } label: {
+                Image(systemName: "pencil")
             }
+            .disabled(stepSelection == nil)
+            .help("Edit the selected step (delay, repeat, condition, parameters)")
 
             Spacer()
 
-            Text("Drag steps to reorder")
+            Text("Double-click or right-click a step to edit it · drag to reorder")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
 
@@ -385,356 +454,6 @@ struct MacroEditor: View {
             .disabled(app.isBusy || current.items.isEmpty)
         }
         .padding(10)
-    }
-
-    private func delayBinding(for stepID: UUID) -> Binding<Double> {
-        Binding(
-            get: {
-                app.store.macro(id: macro.id)?.items
-                    .first { $0.id == stepID }?.delay ?? 0
-            },
-            set: { newValue in
-                app.modify(macro.id) { m in
-                    if let i = m.items.firstIndex(where: { $0.id == stepID }) {
-                        m.items[i].delay = max(0, newValue)
-                    }
-                }
-            })
-    }
-}
-
-// MARK: - add action sheet
-
-struct AddActionSheet: View {
-    enum Kind: String, CaseIterable, Identifiable {
-        case click = "Click"
-        case keyPress = "Key Press"
-        case typeText = "Type Text"
-        case scroll = "Scroll"
-        case movePointer = "Move Pointer"
-        case wait = "Wait"
-        var id: String { rawValue }
-    }
-
-    let onAdd: (ManualAction, Double) -> Void
-    @EnvironmentObject var app: AppState
-    @Environment(\.dismiss) private var dismiss
-
-    @State private var kind: Kind = .click
-    @State private var delay: Double = 0.1
-    @State private var x: Double = 0
-    @State private var y: Double = 0
-    @State private var button: MouseButtonKind = .left
-    @State private var clickCount = 1
-    @State private var text = ""
-    @State private var scrollDX = 0
-    @State private var scrollDY = -120
-    @State private var capturedKey: Hotkey?
-    @State private var capturingKey = false
-    @State private var keyMonitor: Any?
-    @State private var captureCountdown: Int?
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Text("Add Action")
-                .font(.headline)
-                .padding(.top, 18)
-                .padding(.bottom, 10)
-
-            Form {
-                Picker("Action", selection: $kind) {
-                    ForEach(Kind.allCases) { k in Text(k.rawValue).tag(k) }
-                }
-                .pickerStyle(.menu)
-
-                fields
-
-                LabeledContent("Delay before (s)") {
-                    TextField("", value: $delay,
-                              format: .number.precision(.fractionLength(0...3)))
-                        .labelsHidden()
-                        .multilineTextAlignment(.trailing)
-                        .frame(width: 80)
-                }
-            }
-            .formStyle(.grouped)
-            .scrollDisabled(true)
-
-            HStack {
-                Button("Cancel", role: .cancel) { cleanup(); dismiss() }
-                Spacer()
-                Button("Add", action: add)
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!valid)
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 18)
-        }
-        .frame(width: 460)
-        .fixedSize(horizontal: false, vertical: true)
-        .onDisappear { cleanup() }
-    }
-
-    @ViewBuilder
-    private var fields: some View {
-        switch kind {
-        case .click, .movePointer:
-            LabeledContent("Position") {
-                HStack(spacing: 6) {
-                    TextField("", value: $x, format: .number)
-                        .labelsHidden()
-                        .multilineTextAlignment(.trailing)
-                        .frame(width: 64)
-                    Text("×").foregroundStyle(.tertiary)
-                    TextField("", value: $y, format: .number)
-                        .labelsHidden()
-                        .multilineTextAlignment(.trailing)
-                        .frame(width: 64)
-                }
-            }
-            LabeledContent("") {
-                Button(captureCountdown.map { "capturing in \($0)…" }
-                       ?? "Use my cursor position (2s countdown)") {
-                    captureCursorSoon()
-                }
-                .disabled(captureCountdown != nil)
-            }
-            if kind == .click {
-                Picker("Button", selection: $button) {
-                    ForEach(MouseButtonKind.allCases) { b in
-                        Text(b.rawValue).tag(b)
-                    }
-                }
-                .pickerStyle(.menu)
-                Picker("Clicks", selection: $clickCount) {
-                    Text("single").tag(1)
-                    Text("double").tag(2)
-                    Text("triple").tag(3)
-                }
-                .pickerStyle(.menu)
-            }
-        case .keyPress:
-            LabeledContent("Key combo") {
-                Button {
-                    startKeyCapture()
-                } label: {
-                    Text(capturedKey?.display
-                         ?? (capturingKey ? "press keys now…"
-                                          : "click, then press keys"))
-                        .font(.body.monospaced())
-                        .frame(minWidth: 150)
-                }
-            }
-        case .typeText:
-            LabeledContent("Text") {
-                TextField("text to type", text: $text)
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
-            }
-        case .scroll:
-            LabeledContent("Horizontal (px)") {
-                TextField("", value: $scrollDX, format: .number)
-                    .labelsHidden()
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 80)
-            }
-            LabeledContent("Vertical (px)") {
-                TextField("", value: $scrollDY, format: .number)
-                    .labelsHidden()
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 80)
-            }
-            LabeledContent("") {
-                Text("Negative vertical scrolls down, positive scrolls up.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        case .wait:
-            LabeledContent("") {
-                Text("Waits for the delay below, then moves on.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var valid: Bool {
-        switch kind {
-        case .keyPress: return capturedKey != nil
-        case .typeText: return !text.isEmpty
-        default: return true
-        }
-    }
-
-    private func add() {
-        let action: ManualAction
-        switch kind {
-        case .click:
-            action = .click(x: x, y: y, button: button, count: clickCount)
-        case .movePointer:
-            action = .movePointer(x: x, y: y)
-        case .keyPress:
-            guard let hk = capturedKey else { return }
-            action = .keyPress(keyCode: hk.keyCode, modifiers: hk.modifiers)
-        case .typeText:
-            action = .typeText(text: text)
-        case .scroll:
-            action = .scroll(dx: scrollDX, dy: scrollDY)
-        case .wait:
-            action = .wait
-        }
-        cleanup()
-        onAdd(action, delay)
-        dismiss()
-    }
-
-    // Reads the cursor after a short countdown so you can move it where
-    // you want the click to land. CGEvent coordinates match playback.
-    private func captureCursorSoon() {
-        captureCountdown = 2
-        func tick() {
-            guard let n = captureCountdown else { return }
-            if n <= 0 {
-                if let pos = CGEvent(source: nil)?.location {
-                    x = pos.x
-                    y = pos.y
-                }
-                captureCountdown = nil
-                return
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                captureCountdown = (captureCountdown ?? 1) - 1
-                tick()
-            }
-        }
-        tick()
-    }
-
-    private func startKeyCapture() {
-        guard keyMonitor == nil else { return }
-        capturingKey = true
-        app.suspendHotkeys(true)
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
-            let mods = e.modifierFlags
-                .intersection(.deviceIndependentFlagsMask)
-                .intersection([.command, .option, .control, .shift])
-            capturedKey = Hotkey(keyCode: e.keyCode, modifiers: mods.rawValue)
-            cleanup()
-            return nil
-        }
-    }
-
-    private func cleanup() {
-        if let m = keyMonitor { NSEvent.removeMonitor(m) }
-        keyMonitor = nil
-        capturingKey = false
-        app.suspendHotkeys(false)
-    }
-}
-
-// MARK: - shared sheets
-
-struct SaveRecordingSheet: View {
-    @EnvironmentObject var app: AppState
-    let draft: DraftRecording
-    @State private var name = ""
-
-    var body: some View {
-        VStack(spacing: 14) {
-            Text("Recorded \(draft.items.count) steps")
-                .font(.headline)
-            if let target = draft.appendTarget {
-                Button {
-                    app.appendDraftToTarget()
-                } label: {
-                    Label("Add to “\(target.name)”",
-                          systemImage: "text.append")
-                        .frame(width: 240)
-                }
-                .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-                Text("or save as a new macro:")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            TextField("Macro name", text: $name)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 260)
-                .onSubmit(save)
-            HStack {
-                Button("Discard", role: .cancel) { app.discardDraft() }
-                Button(draft.appendTarget == nil ? "Save" : "Save as New",
-                       action: save)
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-        }
-        .padding(24)
-    }
-
-    private func save() {
-        let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        app.saveDraft(named: trimmed)
-    }
-}
-
-// Captures the next key combo pressed while the sheet is frontmost, via a
-// local event monitor — no global listening involved.
-struct HotkeyCaptureSheet: View {
-    let title: String
-    let allowClear: Bool
-    let onCapture: (Hotkey?) -> Void
-    @EnvironmentObject var app: AppState
-    @Environment(\.dismiss) private var dismiss
-    @State private var monitor: Any?
-    @State private var preview = "Press a key combo…"
-
-    var body: some View {
-        VStack(spacing: 14) {
-            Text(title).font(.headline)
-            Text(preview)
-                .font(.title3.monospaced())
-                .frame(width: 280, height: 40)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-            Text(allowClear ? "Esc cancels · Delete clears the hotkey"
-                            : "Esc cancels")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Button("Cancel", role: .cancel) { dismiss() }
-        }
-        .padding(24)
-        .onAppear {
-            app.suspendHotkeys(true)
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
-                handle(e)
-                return nil  // swallow the keystroke
-            }
-        }
-        .onDisappear {
-            if let m = monitor { NSEvent.removeMonitor(m) }
-            monitor = nil
-            app.suspendHotkeys(false)
-        }
-    }
-
-    private func handle(_ e: NSEvent) {
-        if e.keyCode == 53 {  // Esc
-            dismiss()
-            return
-        }
-        if e.keyCode == 51 && allowClear {  // Delete
-            onCapture(nil)
-            dismiss()
-            return
-        }
-        let mods = e.modifierFlags
-            .intersection(.deviceIndependentFlagsMask)
-            .intersection([.command, .option, .control, .shift])
-        let hk = Hotkey(keyCode: e.keyCode, modifiers: mods.rawValue)
-        preview = hk.display
-        onCapture(hk)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { dismiss() }
     }
 }
 

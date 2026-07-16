@@ -56,19 +56,62 @@ final class Player {
         return abortFlag
     }
 
+    // The playback engine. Steps run in order, but each one can carry a
+    // condition (skip when false), a repeat spec (run N times with fixed
+    // or randomized spacing), or control flow (jump / wait-until / stop).
     private func run(items: [MacroItem], loops: Int, speed: Double,
                      progress: @escaping (Int, Int) -> Void) -> Bool {
         var heldKeys = Set<Int64>()
         var loop = 0
-        while !aborted {
+        var stopped = false
+
+        outer: while !aborted && !stopped {
             loop += 1
             let currentLoop = loop
             DispatchQueue.main.async { progress(currentLoop, loops) }
 
-            for item in items {
+            // Per-pass jump budget, so "at most ×N" resets every loop.
+            var jumpsTaken: [UUID: Int] = [:]
+            var i = 0
+            while i < items.count {
+                if aborted { break outer }
+                let item = items[i]
                 sleepInterruptibly(item.delay / speed)
-                if aborted { break }
-                execute(item, held: &heldKeys)
+                if aborted { break outer }
+
+                // The condition is checked at the moment the step would
+                // run, after its delay.
+                if let cond = item.condition, !cond.holds() {
+                    i += 1
+                    continue
+                }
+
+                if case .action(let action) = item.payload {
+                    switch action {
+                    case .goTo(let step, let times):
+                        let taken = jumpsTaken[item.id, default: 0]
+                        if times == 0 || taken < times {
+                            jumpsTaken[item.id] = taken + 1
+                            i = max(0, min(items.count - 1, step - 1))
+                        } else {
+                            i += 1
+                        }
+                        continue
+                    case .waitUntil(let condition, let timeout):
+                        waitUntil(condition, timeout: timeout)
+                        i += 1
+                        continue
+                    case .stopPlayback:
+                        stopped = true
+                        break
+                    default:
+                        break
+                    }
+                    if stopped { break }
+                }
+
+                runRepeated(item, speed: speed, held: &heldKeys)
+                i += 1
             }
             if loops > 0 && loop >= loops { break }
         }
@@ -79,6 +122,29 @@ final class Player {
         isPlaying = false
         stateLock.unlock()
         return wasAborted
+    }
+
+    private func runRepeated(_ item: MacroItem, speed: Double,
+                             held: inout Set<Int64>) {
+        let count = max(1, item.repeats?.count ?? 1)
+        for n in 0..<count {
+            if aborted { return }
+            execute(item, held: &held)
+            if n < count - 1, let spec = item.repeats {
+                sleepInterruptibly(spec.nextInterval() / speed)
+            }
+        }
+    }
+
+    // Poll until the condition holds, the timeout passes (0 = no
+    // timeout), or playback is aborted. Real-world waiting: unaffected
+    // by the speed multiplier.
+    private func waitUntil(_ condition: Condition, timeout: Double) {
+        let deadline = timeout > 0
+            ? Date().addingTimeInterval(timeout) : Date.distantFuture
+        while !aborted && !condition.holds() && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.03)
+        }
     }
 
     private func execute(_ item: MacroItem, held: inout Set<Int64>) {
@@ -162,6 +228,9 @@ final class Player {
                     wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx),
                     wheel3: 0)?
                 .post(tap: .cghidEventTap)
+
+        case .waitUntil, .goTo, .stopPlayback:
+            break  // control flow — handled by the engine in run()
         }
     }
 
