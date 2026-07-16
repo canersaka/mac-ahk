@@ -72,8 +72,8 @@ final class Player {
                 sleepInterruptibly((e.t - prevT) / speed)
                 prevT = e.t
                 if aborted { break }
-                guard let event = MAHEventCreateFromData(e.data as CFData)?
-                    .takeRetainedValue() else { continue }
+                guard let event = MAHEventCreateFromData(e.data as CFData)
+                else { continue }
                 trackHeldKeys(e, event: event, held: &heldKeys)
                 event.post(tap: .cghidEventTap)
             }
