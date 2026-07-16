@@ -2,19 +2,23 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var app: AppState
-    @State private var selection: UUID?
     @State private var capturingHotkeyFor: Macro?
     @State private var capturingRecordHotkey = false
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
-            detail
+        // The status bar lives outside the navigation layout so it can
+        // never overlap the editor's controls.
+        VStack(spacing: 0) {
+            NavigationSplitView {
+                sidebar
+            } detail: {
+                detail
+            }
+            .toolbar { toolbarContent }
+            Divider()
+            statusBar
         }
-        .frame(minWidth: 700, minHeight: 480)
-        .toolbar { toolbarContent }
-        .safeAreaInset(edge: .bottom) { statusBar }
+        .frame(minWidth: 700, minHeight: 500)
         .sheet(item: $app.draft) { draft in
             SaveRecordingSheet(draft: draft)
         }
@@ -34,7 +38,7 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            List(selection: $selection) {
+            List(selection: $app.selection) {
                 if !Permissions.allGranted {
                     PermissionsBanner()
                 }
@@ -74,7 +78,7 @@ struct ContentView: View {
             Divider()
             HStack {
                 Button {
-                    selection = app.createEmptyMacro().id
+                    app.createEmptyMacro()
                 } label: {
                     Label("New Macro", systemImage: "plus")
                 }
@@ -100,14 +104,48 @@ struct ContentView: View {
             bigState(symbol: "play.circle.fill", color: .green,
                      title: "Playing “\(name)”",
                      subtitle: "Loop \(loop) of \(total > 0 ? String(total) : "∞") — press Esc to stop.")
-        } else if let m = app.store.macro(id: selection) {
+        } else if let m = app.store.macro(id: app.selection) {
             MacroEditor(macro: m, capturingHotkeyFor: $capturingHotkeyFor)
                 .id(m.id)
         } else {
-            bigState(symbol: "cursorarrow.click.2", color: .secondary,
-                     title: "No macro selected",
-                     subtitle: "Record something, or create a New Macro and build it step by step.")
+            homePage
         }
+    }
+
+    // The main page: shown when nothing is selected.
+    private var homePage: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "cursorarrow.click.2")
+                .font(.system(size: 56))
+                .foregroundStyle(.secondary)
+            Text("MacAHK").font(.title.bold())
+            Text("Record your mouse and keyboard, or build a macro step by step.")
+                .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                Button {
+                    app.beginRecording()
+                } label: {
+                    Label("Record a Macro", systemImage: "record.circle")
+                        .frame(width: 170)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+
+                Button {
+                    app.createEmptyMacro()
+                } label: {
+                    Label("New Empty Macro", systemImage: "plus")
+                        .frame(width: 170)
+                }
+                .controlSize(.large)
+            }
+            if let hk = app.recordHotkey {
+                Text("Record hotkey: \(hk.display)")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func bigState(symbol: String, color: Color, title: String,
@@ -126,6 +164,22 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItemGroup(placement: .navigation) {
+            Button {
+                app.selection = nil
+            } label: {
+                Label("Home", systemImage: "house")
+            }
+            .disabled(app.selection == nil)
+            .help("Back to the main page")
+
+            Button {
+                app.createEmptyMacro()
+            } label: {
+                Label("New Macro", systemImage: "plus")
+            }
+            .help("Create an empty macro and build it step by step")
+        }
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
                 app.beginRecording()
@@ -133,13 +187,16 @@ struct ContentView: View {
                 Label("Record", systemImage: "record.circle")
             }
             .disabled(app.isBusy)
+            .help(app.selection == nil
+                  ? "Record a new macro"
+                  : "Record — you can append to the selected macro when done")
 
             Button {
-                if let m = app.store.macro(id: selection) { app.play(m) }
+                if let m = app.store.macro(id: app.selection) { app.play(m) }
             } label: {
                 Label("Play", systemImage: "play.fill")
             }
-            .disabled(app.isBusy || selection == nil)
+            .disabled(app.isBusy || app.selection == nil)
 
             Button {
                 app.stopAll()
@@ -167,10 +224,11 @@ struct ContentView: View {
             }
             .buttonStyle(.borderless)
             .help("Global hotkey that starts and stops recording")
-            Toggle("Capture movement", isOn: $app.captureMoves)
+            Toggle("Record mouse path", isOn: $app.captureMoves)
                 .toggleStyle(.checkbox)
                 .font(.callout)
                 .disabled(app.isBusy)
+                .help("Also record cursor movement between clicks, so playback moves the mouse like you did instead of jumping between click points. Makes macros bigger; off is fine for most uses.")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -557,14 +615,28 @@ struct SaveRecordingSheet: View {
         VStack(spacing: 14) {
             Text("Recorded \(draft.items.count) steps")
                 .font(.headline)
+            if let target = draft.appendTarget {
+                Button {
+                    app.appendDraftToTarget()
+                } label: {
+                    Label("Add to “\(target.name)”",
+                          systemImage: "text.append")
+                        .frame(width: 240)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                Text("or save as a new macro:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             TextField("Macro name", text: $name)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 260)
                 .onSubmit(save)
             HStack {
                 Button("Discard", role: .cancel) { app.discardDraft() }
-                Button("Save", action: save)
-                    .keyboardShortcut(.defaultAction)
+                Button(draft.appendTarget == nil ? "Save" : "Save as New",
+                       action: save)
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }

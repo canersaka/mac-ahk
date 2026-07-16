@@ -1,10 +1,12 @@
 import Foundation
 import SwiftUI
 
-// A finished recording waiting to be named.
+// A finished recording waiting to be named — or appended to the macro
+// that was selected when recording started.
 struct DraftRecording: Identifiable {
     let id = UUID()
     var items: [MacroItem]
+    var appendTarget: Macro?
 }
 
 @MainActor
@@ -19,6 +21,7 @@ final class AppState: ObservableObject {
     @Published var mode: Mode = .idle
     @Published var status = "Ready."
     @Published var draft: DraftRecording?
+    @Published var selection: UUID?
     @Published var loops = 1
     @Published var speed = 1.0
     @Published var captureMoves = false
@@ -36,6 +39,7 @@ final class AppState: ObservableObject {
     private let player = Player()
     private let hotkeys = HotkeyCenter()
     private var countdownTask: Task<Void, Never>?
+    private var appendCandidateID: UUID?
     private static let recordHotkeyDefaultsKey = "recordHotkey"
 
     init() {
@@ -81,6 +85,9 @@ final class AppState: ObservableObject {
             Permissions.requestInputMonitoring()
             return
         }
+        // Remember which macro was selected: when recording ends, the
+        // save sheet offers to append the new steps to it.
+        appendCandidateID = selection
         hotkeys.enabled = false
         countdownTask = Task { [weak self] in
             for i in stride(from: 3, through: 1, by: -1) {
@@ -118,7 +125,9 @@ final class AppState: ObservableObject {
             if items.isEmpty {
                 status = "Nothing recorded."
             } else {
-                draft = DraftRecording(items: items)
+                draft = DraftRecording(
+                    items: items,
+                    appendTarget: store.macro(id: appendCandidateID))
                 status = "Recorded \(items.count) steps."
             }
         case .playing:
@@ -134,7 +143,16 @@ final class AppState: ObservableObject {
         store.upsert(macro)
         hotkeys.rebuild(from: store.macros)
         self.draft = nil
+        selection = macro.id
         status = "Saved “\(name)”."
+    }
+
+    func appendDraftToTarget() {
+        guard let draft, let target = draft.appendTarget else { return }
+        modify(target.id) { $0.items.append(contentsOf: draft.items) }
+        self.draft = nil
+        selection = target.id
+        status = "Added \(draft.items.count) steps to “\(target.name)”."
     }
 
     func discardDraft() {
@@ -174,11 +192,11 @@ final class AppState: ObservableObject {
 
     // MARK: library and editing
 
-    func createEmptyMacro() -> Macro {
+    func createEmptyMacro() {
         let macro = Macro(name: "New Macro", items: [])
         store.upsert(macro)
+        selection = macro.id
         status = "Created an empty macro — add steps with the ＋ button."
-        return macro
     }
 
     func delete(_ macro: Macro) {
