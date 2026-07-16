@@ -70,21 +70,7 @@ requested only when you actually add a pixel condition, never at launch,
 and it's used for nothing else. In scripts: `onlyif pixel 100 200
 #FF8800 10` or `waituntil pixel 100 200 #00FF00, 30`.
 
-## About the Mac App Store
 
-An app in this category cannot be sold on the Mac App Store — App Store
-apps are sandboxed, and the sandbox forbids both global input monitoring
-and posting synthetic input to other apps. That's an Apple platform rule,
-not a limitation of this code; it's why Keyboard Maestro, BetterTouchTool
-and Hammerspoon all ship as direct downloads. To distribute MacAHK the
-same way they do, sign with a Developer ID certificate and notarize:
-
-```
-SIGN_ID="Developer ID Application: Your Name (TEAMID)" ./build_app.sh
-ditto -c -k --keepParent MacAHK.app MacAHK.zip
-xcrun notarytool submit MacAHK.zip --keychain-profile <profile> --wait
-xcrun stapler staple MacAHK.app
-```
 
 ## Known limits
 
