@@ -51,7 +51,7 @@ final class Recorder {
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .listenOnly,
-            eventsOfInterest: CGEventMask(~0),
+            eventsOfInterest: ~CGEventMask(0),
             callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque())
         else { return false }
