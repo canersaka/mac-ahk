@@ -526,20 +526,22 @@ enum RawEventInfo {
     static func label(type: UInt32, data: Data) -> String {
         let ev = MAHEventCreateFromData(data as CFData)
         let loc = ev.map { "(\(Int($0.location.x)), \(Int($0.location.y)))" } ?? ""
+        // "press"/"release" spelled out: the old ↓/↑ glyphs read like
+        // the arrow keys, which confused everyone.
         switch type {
-        case 1: return "left click ↓ \(loc)"
-        case 2: return "left click ↑ \(loc)"
-        case 3: return "right click ↓ \(loc)"
-        case 4: return "right click ↑ \(loc)"
-        case 25: return "middle click ↓ \(loc)"
-        case 26: return "middle click ↑ \(loc)"
+        case 1: return "left click (press) \(loc)"
+        case 2: return "left click (release) \(loc)"
+        case 3: return "right click (press) \(loc)"
+        case 4: return "right click (release) \(loc)"
+        case 25: return "middle click (press) \(loc)"
+        case 26: return "middle click (release) \(loc)"
         case 5: return "move \(loc)"
         case 6, 7, 27: return "drag \(loc)"
         case 10, 11:
             let code = ev.map {
                 UInt16($0.getIntegerValueField(.keyboardEventKeycode))
             } ?? 0
-            return "key \(type == 10 ? "↓" : "↑") \(KeyNames.name(for: code))"
+            return "key \(KeyNames.name(for: code)) \(type == 10 ? "(press)" : "(release)")"
         case 12:
             let code = ev.map {
                 UInt16($0.getIntegerValueField(.keyboardEventKeycode))

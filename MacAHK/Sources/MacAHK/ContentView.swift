@@ -122,9 +122,17 @@ struct ContentView: View {
                      title: "Recording",
                      subtitle: "Everything you do is being captured.\nPress Esc\(app.recordHotkey.map { " or \($0.display)" } ?? "") to finish.")
         } else if case .playing(let name, let loop, let total) = app.mode {
-            bigState(symbol: "play.circle.fill", color: .green,
-                     title: "Playing “\(name)”",
-                     subtitle: "Loop \(loop) of \(total > 0 ? String(total) : "∞") — press Esc to stop.")
+            // If the playing macro's editor is open, keep it on screen so
+            // the step being executed can be highlighted live.
+            if let m = app.store.macro(id: app.selection),
+               m.id == app.playingMacroID {
+                MacroEditor(macro: m, capturingHotkeyFor: $capturingHotkeyFor)
+                    .id(m.id)
+            } else {
+                bigState(symbol: "play.circle.fill", color: .green,
+                         title: "Playing “\(name)”",
+                         subtitle: "Loop \(loop) of \(total > 0 ? String(total) : "∞") — press Esc to stop.")
+            }
         } else if let m = app.store.macro(id: app.selection) {
             MacroEditor(macro: m, capturingHotkeyFor: $capturingHotkeyFor)
                 .id(m.id)
@@ -337,32 +345,56 @@ struct MacroEditor: View {
     }
 
     private var stepsList: some View {
-        List(selection: $stepSelection) {
-            ForEach(Array(current.items.enumerated()), id: \.element.id) {
-                index, item in
-                stepRow(index: index, item: item)
-            }
-            .onMove { from, to in
-                app.modify(macro.id) { $0.items.move(fromOffsets: from,
-                                                     toOffset: to) }
-            }
-            .onDelete { offsets in
-                app.modify(macro.id) { $0.items.remove(atOffsets: offsets) }
-            }
+        ScrollViewReader { proxy in
+            List(selection: $stepSelection) {
+                ForEach(Array(current.items.enumerated()), id: \.element.id) {
+                    index, item in
+                    stepRow(index: index, item: item)
+                        .listRowBackground(isCurrentStep(index)
+                            ? Color.green.opacity(0.16) : nil)
+                }
+                .onMove { from, to in
+                    app.modify(macro.id) { $0.items.move(fromOffsets: from,
+                                                         toOffset: to) }
+                }
+                .onDelete { offsets in
+                    app.modify(macro.id) { $0.items.remove(atOffsets: offsets) }
+                }
 
-            if current.items.isEmpty {
-                Text("No steps yet. Use ＋ to add actions, record with this macro selected to append, or import a script.")
-                    .foregroundStyle(.secondary)
+                if current.items.isEmpty {
+                    Text("No steps yet. Use ＋ to add actions, record with this macro selected to append, or import a script.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .onChange(of: app.playingStep) { step in
+                // Follow playback: keep the executing step in view.
+                guard let step, app.playingMacroID == current.id,
+                      step < current.items.count else { return }
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    proxy.scrollTo(current.items[step].id, anchor: .center)
+                }
             }
         }
     }
 
+    // Is this row the step the player is executing right now?
+    private func isCurrentStep(_ index: Int) -> Bool {
+        app.playingMacroID == current.id && app.playingStep == index
+    }
+
     private func stepRow(index: Int, item: MacroItem) -> some View {
         HStack {
-            Text("\(index + 1)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.tertiary)
-                .frame(width: 32, alignment: .trailing)
+            if isCurrentStep(index) {
+                Image(systemName: "play.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                    .frame(width: 32, alignment: .trailing)
+            } else {
+                Text("\(index + 1)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 32, alignment: .trailing)
+            }
             stepIcon(item)
             Text(item.label)
             if let cond = item.condition {

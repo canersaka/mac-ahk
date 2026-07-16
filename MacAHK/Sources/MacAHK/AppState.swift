@@ -29,6 +29,10 @@ final class AppState: ObservableObject {
     @Published var status = "Ready."
     @Published var draft: DraftRecording?
     @Published var selection: UUID?
+    // Live playback position, for highlighting the current step in the
+    // editor while its macro plays.
+    @Published var playingMacroID: UUID?
+    @Published var playingStep: Int?
     @Published var loops = 1
     @Published var speed = 1.0
     @Published var captureMoves = false
@@ -199,6 +203,8 @@ final class AppState: ObservableObject {
         }
         hotkeys.enabled = false
         let name = macro.name
+        playingMacroID = macro.id
+        playingStep = nil
         let ok = player.play(
             items: macro.items, loops: loops, speed: speed,
             progress: { [weak self] loop, totalLoops in
@@ -207,13 +213,20 @@ final class AppState: ObservableObject {
                 let t = totalLoops > 0 ? "\(totalLoops)" : "∞"
                 self?.status = "Playing “\(name)” — loop \(loop)/\(t) — Esc stops."
             },
+            onStep: { [weak self] index in
+                self?.playingStep = index
+            },
             done: { [weak self] aborted in
                 self?.mode = .idle
+                self?.playingMacroID = nil
+                self?.playingStep = nil
                 self?.hotkeys.enabled = true
                 self?.status = aborted ? "Stopped." : "Done."
             })
         if !ok {
             mode = .idle
+            playingMacroID = nil
+            playingStep = nil
             hotkeys.enabled = true
         }
     }
@@ -289,28 +302,47 @@ final class AppState: ObservableObject {
             let original = m.items[i]
             m.items[i].payload = .action(action)
             m.items[i].label = action.label
-
-            if let releaseType = original.pairedReleaseType {
-                let keyCode = original.rawKeyCode
-                for j in (i + 1)..<m.items.count {
-                    guard case .raw(let t, _) = m.items[j].payload,
-                          t == releaseType else { continue }
-                    if releaseType == 11,
-                       let kc = keyCode, m.items[j].rawKeyCode != kc {
-                        continue
-                    }
-                    // Fold the removed step's delay into its successor so
-                    // overall timing stays intact.
-                    let removedDelay = m.items[j].delay
-                    if j + 1 < m.items.count {
-                        m.items[j + 1].delay += removedDelay
-                    }
-                    m.items.remove(at: j)
-                    break
-                }
-            }
+            Self.removePairedRelease(for: original, in: &m, after: i + 1)
         }
         status = "Converted to an editable action."
+    }
+
+    // Replace a recorded step wholesale with a manual action (the edit
+    // sheet's "Replace with" flow). If the original was a press-type raw
+    // event, its matching release is cleaned up like conversion does.
+    func replaceRawStepWithAction(_ item: MacroItem, in id: UUID,
+                                  original: MacroItem) {
+        modify(id) { m in
+            guard let i = m.items.firstIndex(where: { $0.id == item.id })
+            else { return }
+            m.items[i] = item
+            Self.removePairedRelease(for: original, in: &m, after: i + 1)
+        }
+        status = "Updated: \(item.label)"
+    }
+
+    // Remove the release event paired with a press-type raw step,
+    // folding the removed step's delay into its successor so overall
+    // timing stays intact.
+    private static func removePairedRelease(for original: MacroItem,
+                                            in m: inout Macro,
+                                            after start: Int) {
+        guard let releaseType = original.pairedReleaseType else { return }
+        let keyCode = original.rawKeyCode
+        for j in start..<m.items.count {
+            guard case .raw(let t, _) = m.items[j].payload,
+                  t == releaseType else { continue }
+            if releaseType == 11,
+               let kc = keyCode, m.items[j].rawKeyCode != kc {
+                continue
+            }
+            let removedDelay = m.items[j].delay
+            if j + 1 < m.items.count {
+                m.items[j + 1].delay += removedDelay
+            }
+            m.items.remove(at: j)
+            break
+        }
     }
 
     func setHotkey(_ hotkey: Hotkey?, for macro: Macro) {

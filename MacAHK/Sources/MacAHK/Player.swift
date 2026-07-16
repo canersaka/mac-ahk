@@ -10,11 +10,18 @@ final class Player {
     private(set) var isPlaying = false
     private var abortFlag = false
     private let stateLock = NSLock()
-    private var escMonitor: Any?
 
-    // progress(loop, totalLoops) and done(aborted) are called on main.
+    // Playback-thread-only state (no lock needed): the throttle for step
+    // progress posts, and the grace window during which a *synthetic*
+    // Esc pressed by the macro itself must not read as the user's abort.
+    private var lastStepPost = Date.distantPast
+    private var suppressEscUntil = Date.distantPast
+
+    // progress(loop, totalLoops), onStep(stepIndex) and done(aborted)
+    // are all called on main.
     func play(items: [MacroItem], loops: Int, speed: Double,
               progress: @escaping (Int, Int) -> Void,
+              onStep: @escaping (Int) -> Void,
               done: @escaping (Bool) -> Void) -> Bool {
         stateLock.lock()
         guard !isPlaying, !items.isEmpty else {
@@ -25,21 +32,15 @@ final class Player {
         abortFlag = false
         stateLock.unlock()
 
-        escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) {
-            [weak self] e in
-            if e.keyCode == 53 { self?.stop() }
-        }
-
         let clampedSpeed = max(speed, 0.05)
         Thread.detachNewThread { [weak self] in
             guard let self else { return }
+            self.lastStepPost = .distantPast
+            self.suppressEscUntil = .distantPast
             let aborted = self.run(items: items, loops: loops,
-                                   speed: clampedSpeed, progress: progress)
-            DispatchQueue.main.async {
-                if let m = self.escMonitor { NSEvent.removeMonitor(m) }
-                self.escMonitor = nil
-                done(aborted)
-            }
+                                   speed: clampedSpeed, progress: progress,
+                                   onStep: onStep)
+            DispatchQueue.main.async { done(aborted) }
         }
         return true
     }
@@ -50,17 +51,29 @@ final class Player {
         stateLock.unlock()
     }
 
+    // Checked from the playback thread between events and inside sleeps.
+    // Esc is read straight from the session key state: an NSEvent global
+    // monitor (the old approach) never fires while MacAHK itself is
+    // frontmost — which is exactly when Play is usually pressed.
     private var aborted: Bool {
         stateLock.lock()
-        defer { stateLock.unlock() }
-        return abortFlag
+        let flagged = abortFlag
+        stateLock.unlock()
+        if flagged { return true }
+        if Date() >= suppressEscUntil,
+           CGEventSource.keyState(.combinedSessionState, key: 53) {
+            stop()
+            return true
+        }
+        return false
     }
 
     // The playback engine. Steps run in order, but each one can carry a
     // condition (skip when false), a repeat spec (run N times with fixed
     // or randomized spacing), or control flow (jump / wait-until / stop).
     private func run(items: [MacroItem], loops: Int, speed: Double,
-                     progress: @escaping (Int, Int) -> Void) -> Bool {
+                     progress: @escaping (Int, Int) -> Void,
+                     onStep: @escaping (Int) -> Void) -> Bool {
         var heldKeys = Set<Int64>()
         var loop = 0
         var stopped = false
@@ -76,6 +89,7 @@ final class Player {
             while i < items.count {
                 if aborted { break outer }
                 let item = items[i]
+                postStep(i, onStep: onStep)
                 sleepInterruptibly(item.delay / speed)
                 if aborted { break outer }
 
@@ -124,6 +138,15 @@ final class Player {
         return wasAborted
     }
 
+    // Step highlight updates are best-effort: cap the rate so a dense
+    // raw recording doesn't flood the main thread with UI updates.
+    private func postStep(_ index: Int, onStep: @escaping (Int) -> Void) {
+        let now = Date()
+        guard now.timeIntervalSince(lastStepPost) >= 0.05 else { return }
+        lastStepPost = now
+        DispatchQueue.main.async { onStep(index) }
+    }
+
     private func runRepeated(_ item: MacroItem, speed: Double,
                              held: inout Set<Int64>) {
         let count = max(1, item.repeats?.count ?? 1)
@@ -155,6 +178,18 @@ final class Player {
             guard let event = MAHEventCreateFromData(data as CFData)
             else { return }
             trackHeldKeys(type: type, event: event, held: &held)
+            suppressEscIfNeeded(type: type, event: event)
+            // The serialized bytes keep their record-time timestamp;
+            // stale stamps trip up double-click detection and event
+            // coalescing in some apps, so restamp before posting.
+            event.timestamp = DispatchTime.now().uptimeNanoseconds
+            // A bare recorded click teleports the cursor and presses in
+            // the same event, which hover-sensitive targets can miss
+            // (especially with "Record mouse path" off). Walk the
+            // cursor there first.
+            if type == 1 || type == 3 || type == 25 {
+                settleCursor(at: event.location)
+            }
             event.post(tap: .cghidEventTap)
         case .action(let action):
             perform(action)
@@ -177,6 +212,7 @@ final class Player {
 
         case .click(let x, let y, let button, let count):
             let pt = CGPoint(x: x, y: y)
+            settleCursor(at: pt)
             for i in 1...max(count, 1) {
                 for (type, _) in [(button.downType, true),
                                   (button.upType, false)] {
@@ -192,6 +228,7 @@ final class Player {
             }
 
         case .keyPress(let code, let modifiers):
+            if code == 53 { suppressEsc(for: 0.5) }
             Synth.tapKey(CGKeyCode(code),
                          flags: Hotkey(keyCode: code,
                                        modifiers: modifiers).cgFlags,
@@ -237,6 +274,7 @@ final class Player {
                         mouseCursorPosition: point, mouseButton: .left)?
                     .post(tap: .cghidEventTap)
             } else {
+                settleCursor(at: point)
                 for type in [button.downType, button.upType] {
                     CGEvent(mouseEventSource: src, mouseType: type,
                             mouseCursorPosition: point,
@@ -254,6 +292,39 @@ final class Player {
         case .waitUntil, .goTo, .stopPlayback:
             break  // control flow — handled by the engine in run()
         }
+    }
+
+    // MARK: esc / cursor helpers
+
+    // A macro can itself press Esc (recorded, or via `press esc`).
+    // Without a grace window, replaying that keystroke would read as the
+    // user's abort. Physical Esc works again once the window passes, and
+    // the Stop button always works.
+    private func suppressEsc(for seconds: Double) {
+        let until = Date().addingTimeInterval(seconds)
+        if until > suppressEscUntil { suppressEscUntil = until }
+    }
+
+    private func suppressEscIfNeeded(type: UInt32, event: CGEvent) {
+        guard type == 10 || type == 11 || type == 12,
+              event.getIntegerValueField(.keyboardEventKeycode) == 53
+        else { return }
+        // Down: cover until the paired up should long since have played.
+        suppressEsc(for: type == 10 ? 2.0 : 0.3)
+    }
+
+    // Move the pointer onto the click point and give the target a moment
+    // to notice hover before the press lands. Skipped when it's already
+    // there (e.g. the recording contains the mouse path).
+    private func settleCursor(at point: CGPoint) {
+        if let current = CGEvent(source: nil)?.location,
+           abs(current.x - point.x) < 2, abs(current.y - point.y) < 2 {
+            return
+        }
+        CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+                mouseCursorPosition: point, mouseButton: .left)?
+            .post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.015)
     }
 
     // MARK: cleanup

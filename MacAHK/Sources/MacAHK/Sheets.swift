@@ -904,6 +904,9 @@ struct EditStepSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var action: ActionFormModel
     @State private var options: StepOptionsModel
+    // For recorded (raw) steps: nil keeps the event as-is; picking a
+    // kind rebuilds the step as that action on save.
+    @State private var replaceKind: ActionFormModel.ActionKind?
 
     init(macroID: UUID, item: MacroItem) {
         self.macroID = macroID
@@ -913,6 +916,10 @@ struct EditStepSheet: View {
         if case .action(let a) = item.payload {
             form = ActionFormModel(from: a)
             actionable = true
+        } else if let converted = item.convertedAction {
+            // Prefill from the recorded values so "Replace with" starts
+            // from the right position/key instead of a blank form.
+            form = ActionFormModel(from: converted)
         }
         self.isAction = actionable
         _action = State(initialValue: form)
@@ -940,19 +947,23 @@ struct EditStepSheet: View {
                 } else {
                     Section("Recorded event") {
                         LabeledContent("Step", value: original.label)
-                        if original.convertedAction != nil {
-                            Button("Convert to editable action") {
-                                app.convertStepToAction(original.id,
-                                                        in: macroID)
-                                dismiss()
+                        Picker("Replace with", selection: $replaceKind) {
+                            Text("Keep recorded event")
+                                .tag(ActionFormModel.ActionKind?.none)
+                            ForEach(ActionFormModel.ActionKind.allCases) { k in
+                                Text(k.rawValue).tag(Optional(k))
                             }
-                            Text("Turns this into a Click/Key/Scroll/Move action whose position, key, and repeats you can edit. The matching release event is cleaned up automatically.")
+                        }
+                        .pickerStyle(.menu)
+                        .onChange(of: replaceKind) { kind in
+                            if let kind { action.kind = kind }
+                        }
+                        if replaceKind == nil {
+                            Text("This event replays verbatim. Pick an action type above to rebuild the step as anything else (a matching release event is cleaned up automatically), or just edit timing, repeat, and condition below.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         } else {
-                            Text("This event replays verbatim; its timing, repeat, and condition are editable below.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            ActionFields(model: $action)
                         }
                     }
                 }
@@ -966,7 +977,8 @@ struct EditStepSheet: View {
                 Button("Save", action: save)
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
-                    .disabled((isAction && !action.valid) || !options.valid)
+                    .disabled(((isAction || replaceKind != nil)
+                               && !action.valid) || !options.valid)
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 18)
@@ -976,14 +988,20 @@ struct EditStepSheet: View {
 
     private func save() {
         var item = original
-        if isAction, let built = action.build() {
+        let replacingRaw = !isAction && replaceKind != nil
+        if isAction || replacingRaw, let built = action.build() {
             item.payload = .action(built)
             item.label = built.label
         }
         item.delay = max(0, options.delay)
         item.repeats = options.buildRepeats()
         item.condition = options.buildCondition()
-        app.replaceStep(item, in: macroID)
+        if replacingRaw {
+            app.replaceRawStepWithAction(item, in: macroID,
+                                         original: original)
+        } else {
+            app.replaceStep(item, in: macroID)
+        }
         dismiss()
     }
 }
