@@ -3,21 +3,31 @@ import AppKit
 import SwiftUI
 
 // A line-based script language that maps 1:1 onto macro steps, with
-// enough AutoHotkey v1 compatibility that many input-level AHK scripts
-// paste straight in. Window management, pixel search, variables and
-// expressions have no macOS equivalent here — those lines come back as
-// warnings instead of silently vanishing.
+// enough AutoHotkey v1 compatibility that many AHK scripts paste
+// straight in. Variables, expressions and control structures have no
+// equivalent here — those lines come back as warnings instead of
+// silently vanishing.
 //
 //   ; comments start with ; (or #, AHK directives are skipped)
 //   F6::                     ; AHK hotkey label → becomes the macro hotkey
+//   ::btw::by the way        ; hotstring → system-wide text expansion
 //   click 100, 200           ; left click (also: click 100 200 right 2)
 //   mousemove 300, 400
 //   send Hello world{Enter}  ; types text; {Enter}/{Tab}/{Space} expand
 //   press cmd+shift+a        ; key combo (AHK ^!+# prefixes work too)
 //   scroll 0, -120
+//   run Safari               ; open/activate an app (AHK Run/WinActivate)
+//   run https://apple.com    ; …or a URL, in the default browser
+//   winwait Untitled, 10     ; wait for a window title (max 10s)
+//   ifwinactive Safari       ; NEXT step runs only if the app is frontmost
+//   clipboard Hello          ; put text on the clipboard
+//   paste                    ; press ⌘V
+//   notify All done          ; notification banner (AHK MsgBox/TrayTip)
+//   beep                     ; system alert sound
 //   sleep 500                ; ms — becomes the next step's delay
 //   wait 1.5                 ; seconds — same thing
 //   waituntil key f6, 10     ; pause until condition (max 10s, 0=forever)
+//   waituntil window Save As ; …conditions can be app-aware, too
 //   goto 2, 50               ; jump to step 2, at most 50 times
 //   stop                     ; end playback
 //   repeat 1000, 0.1, 0.3    ; modifies the PREVIOUS step: run 1000×,
@@ -26,12 +36,16 @@ import SwiftUI
 //   onlyifnot mouse right    ; ...or only while right button is NOT held
 //
 // Conditions: key <name> · mouse <left|right|middle> · mods <cmd+shift>
-//             · region <x> <y> <w> <h>
+//             · region <x> <y> <w> <h> · pixel <x> <y> <#rrggbb> [tol]
+//             · app <name> · window <title fragment> · clipboard <text>
 enum ScriptParser {
     struct Result {
         var items: [MacroItem] = []
         var warnings: [String] = []
         var hotkey: Hotkey?
+        var hotstrings: [Hotstring] = []
+        // Set by ifwinactive; consumed by the next appended step.
+        var pendingCondition: Condition?
     }
 
     private static let defaultGap = 0.05
@@ -54,13 +68,20 @@ enum ScriptParser {
                     .trimmingCharacters(in: .whitespaces)
             }
 
-            // AHK hotkey labels: `F6::` / `^!a::` (hotstrings `::x::y`
-            // are text expansion, which we don't do).
-            if line.hasSuffix("::") {
-                if line.hasPrefix("::") {
-                    warn(&result, n, "hotstrings aren't supported: \(line)")
-                    continue
+            // Hotstrings: `::btw::by the way` (an AHK options block like
+            // `:*:` is accepted and ignored — expansion always fires
+            // immediately here, which is what * means).
+            if line.hasPrefix(":") {
+                if let hs = hotstring(fromLine: line) {
+                    result.hotstrings.append(hs)
+                } else {
+                    warn(&result, n, "couldn't read hotstring: \(line)")
                 }
+                continue
+            }
+
+            // AHK hotkey labels: `F6::` / `^!a::`.
+            if line.hasSuffix("::") {
                 let combo = String(line.dropLast(2))
                 if let hk = hotkey(fromAHKLabel: combo) {
                     if result.hotkey == nil {
@@ -186,6 +207,81 @@ enum ScriptParser {
         case "stop", "exit", "exitapp":
             append(.stopPlayback, to: &result, pendingDelay: &pendingDelay)
 
+        case "run", "open":
+            guard !tail.isEmpty else {
+                warn(&result, lineNo, "\(head) needs an app name or URL")
+                return
+            }
+            if tail.contains("://") || tail.lowercased().hasPrefix("mailto:") {
+                append(.openURL(url: tail), to: &result,
+                       pendingDelay: &pendingDelay)
+            } else {
+                append(.openApp(name: tail), to: &result,
+                       pendingDelay: &pendingDelay)
+            }
+
+        case "url", "openurl":
+            guard !tail.isEmpty else {
+                warn(&result, lineNo, "url needs an address")
+                return
+            }
+            append(.openURL(url: tail), to: &result,
+                   pendingDelay: &pendingDelay)
+
+        case "winactivate", "activate":
+            guard !tail.isEmpty else {
+                warn(&result, lineNo, "\(head) needs an app name")
+                return
+            }
+            append(.openApp(name: tail), to: &result,
+                   pendingDelay: &pendingDelay)
+
+        case "winwait":
+            // winwait <title>[, timeout seconds]
+            guard !args.isEmpty else {
+                warn(&result, lineNo, "winwait needs a window title")
+                return
+            }
+            var title = tail
+            var timeout = 0.0
+            if args.count >= 2, let t = Double(args.last!) {
+                timeout = max(0, t)
+                title = args.dropLast().joined(separator: " ")
+            }
+            append(.waitUntil(
+                       condition: Condition(kind: .windowTitled,
+                                            text: title),
+                       timeout: timeout),
+                   to: &result, pendingDelay: &pendingDelay)
+
+        case "ifwinactive":
+            guard !tail.isEmpty else {
+                warn(&result, lineNo, "ifwinactive needs an app name")
+                return
+            }
+            // AHK style: the line after this one is the guarded one.
+            result.pendingCondition = Condition(kind: .appFrontmost,
+                                                text: tail)
+
+        case "clipboard", "setclipboard":
+            append(.setClipboard(text: tail), to: &result,
+                   pendingDelay: &pendingDelay)
+
+        case "paste":
+            append(.pasteClipboard, to: &result,
+                   pendingDelay: &pendingDelay)
+
+        case "notify", "msgbox", "traytip", "tooltip":
+            guard !tail.isEmpty else {
+                warn(&result, lineNo, "\(head) needs a message")
+                return
+            }
+            append(.notify(message: tail), to: &result,
+                   pendingDelay: &pendingDelay)
+
+        case "beep", "soundbeep":
+            append(.beep, to: &result, pendingDelay: &pendingDelay)
+
         case "repeat":
             guard !result.items.isEmpty else {
                 warn(&result, lineNo, "repeat must follow a step")
@@ -220,9 +316,12 @@ enum ScriptParser {
             warn(&result, lineNo,
                  "AHK Loop blocks aren't supported — use `repeat` on a step, or `goto` with a max count")
 
-        case "winactivate", "winwait", "winclose", "ifwinactive",
-             "controlclick", "controlsend", "pixelsearch",
-             "imagesearch", "pixelgetcolor", "msgbox":
+        case "imagesearch":
+            warn(&result, lineNo,
+                 "imagesearch needs an image file — add a Click Image action or an image-on-screen condition in the editor instead")
+
+        case "winclose", "controlclick", "controlsend", "pixelsearch",
+             "pixelgetcolor":
             warn(&result, lineNo,
                  "\(head) has no macOS equivalent in MacAHK — line skipped")
 
@@ -277,10 +376,32 @@ enum ScriptParser {
     private static func append(_ action: ManualAction,
                                to result: inout Result,
                                pendingDelay: inout Double) {
-        result.items.append(MacroItem(delay: max(0, pendingDelay),
-                                      payload: .action(action),
-                                      label: action.label))
+        var item = MacroItem(delay: max(0, pendingDelay),
+                             payload: .action(action),
+                             label: action.label)
+        if let cond = result.pendingCondition {
+            item.condition = cond
+            result.pendingCondition = nil
+        }
+        result.items.append(item)
         pendingDelay = defaultGap
+    }
+
+    // `::trigger::replacement`, optionally with an AHK options block:
+    // `:*:trigger::replacement`. Options are accepted and ignored.
+    static func hotstring(fromLine line: String) -> Hotstring? {
+        guard line.hasPrefix(":") else { return nil }
+        let afterFirst = line.dropFirst()
+        guard let optsEnd = afterFirst.firstIndex(of: ":") else {
+            return nil
+        }
+        let body = afterFirst[afterFirst.index(after: optsEnd)...]
+        guard let sep = body.range(of: "::") else { return nil }
+        let trigger = String(body[..<sep.lowerBound])
+        let replacement = String(body[sep.upperBound...])
+            .trimmingCharacters(in: .whitespaces)
+        guard !trigger.isEmpty, !replacement.isEmpty else { return nil }
+        return Hotstring(trigger: trigger, replacement: replacement)
     }
 
     private static func warn(_ result: inout Result, _ line: Int,
@@ -366,16 +487,18 @@ enum ScriptParser {
     }
 
     static func condition(from text: String) -> Condition? {
-        var tokens = text.lowercased()
+        // Keywords compare lowercased, but the payload of the text
+        // conditions (app names, window titles) keeps its case.
+        var tokens = text
             .split(whereSeparator: { $0 == " " || $0 == "," })
             .map(String.init)
         guard !tokens.isEmpty else { return nil }
         var negated = false
-        if tokens[0] == "not" {
+        if tokens[0].lowercased() == "not" {
             negated = true
             tokens.removeFirst()
         }
-        guard let kind = tokens.first else { return nil }
+        guard let kind = tokens.first?.lowercased() else { return nil }
         let rest = Array(tokens.dropFirst())
         switch kind {
         case "key":
@@ -383,13 +506,13 @@ enum ScriptParser {
                   let code = keyCode(for: name) else { return nil }
             return Condition(kind: .keyHeld, negated: negated, keyCode: code)
         case "mouse", "button":
-            guard let name = rest.first,
+            guard let name = rest.first?.lowercased(),
                   let b = MouseButtonKind(rawValue: name) else { return nil }
             return Condition(kind: .mouseHeld, negated: negated, button: b)
         case "mods", "modifiers":
             guard let combo = rest.first else { return nil }
             var mods: NSEvent.ModifierFlags = []
-            for part in combo.split(separator: "+") {
+            for part in combo.lowercased().split(separator: "+") {
                 switch part {
                 case "cmd", "command": mods.insert(.command)
                 case "ctrl", "control": mods.insert(.control)
@@ -401,6 +524,21 @@ enum ScriptParser {
             guard !mods.isEmpty else { return nil }
             return Condition(kind: .modifiersHeld, negated: negated,
                              modifiers: mods.rawValue)
+        case "app":
+            let name = rest.joined(separator: " ")
+            guard !name.isEmpty else { return nil }
+            return Condition(kind: .appFrontmost, negated: negated,
+                             text: name)
+        case "window", "win", "title":
+            let fragment = rest.joined(separator: " ")
+            guard !fragment.isEmpty else { return nil }
+            return Condition(kind: .windowTitled, negated: negated,
+                             text: fragment)
+        case "clipboard", "clip":
+            let fragment = rest.joined(separator: " ")
+            guard !fragment.isEmpty else { return nil }
+            return Condition(kind: .clipboardContains, negated: negated,
+                             text: fragment)
         case "region":
             let numbers = rest.compactMap { Double($0) }
             guard numbers.count >= 4 else { return nil }
@@ -457,7 +595,7 @@ enum ScriptParser {
                 }
             }
             if let c = item.condition {
-                if c.kind == .regionLooksLike {
+                if c.kind == .regionLooksLike || c.kind == .imageOnScreen {
                     lines.append("; [snapshot condition on the step above can't be scripted — re-add it in the editor]")
                 } else {
                     lines.append((c.negated ? "onlyifnot " : "onlyif ")
@@ -486,10 +624,26 @@ enum ScriptParser {
                 .replacingOccurrences(of: "\t", with: "{Tab}")
         case .scroll(let dx, let dy):
             return "scroll \(dx), \(dy)"
+        case .openApp(let name):
+            return "run \(name)"
+        case .openURL(let url):
+            return "run \(url)"
+        case .setClipboard(let text):
+            return "clipboard " + text
+                .replacingOccurrences(of: "\n", with: " ")
+        case .pasteClipboard:
+            return "paste"
+        case .clickImage:
+            return "; [click-image step can't be scripted — re-add it in the editor]"
+        case .notify(let message):
+            return "notify \(message.replacingOccurrences(of: "\n", with: " "))"
+        case .beep:
+            return "beep"
         case .wait:
             return "; (wait step — its time is the sleep above)"
         case .waitUntil(let condition, let timeout):
-            if condition.kind == .regionLooksLike {
+            if condition.kind == .regionLooksLike
+                || condition.kind == .imageOnScreen {
                 return "; [waituntil with a snapshot condition can't be scripted — re-add it in the editor]"
             }
             var s = "waituntil " + (condition.negated ? "not " : "")
@@ -521,7 +675,13 @@ enum ScriptParser {
             return "region \(Int(c.x)) \(Int(c.y)) \(Int(c.w)) \(Int(c.h))"
         case .pixelColor:
             return "pixel \(Int(c.x)) \(Int(c.y)) \(c.hexColor) \(trim(c.tolerance))"
-        case .regionLooksLike:
+        case .appFrontmost:
+            return "app \(c.text)"
+        case .windowTitled:
+            return "window \(c.text)"
+        case .clipboardContains:
+            return "clipboard \(c.text)"
+        case .regionLooksLike, .imageOnScreen:
             return "region-snapshot"  // placeholder; handled by export()
         }
     }
@@ -556,7 +716,7 @@ struct ImportScriptSheet: View {
             Text("Import Script")
                 .font(.headline)
                 .padding(.top, 18)
-            Text("Paste a MacAHK script or an input-level AutoHotkey script. Clicks, keys, Send, Sleep and hotkey labels translate; window and pixel commands are flagged below.")
+            Text("Paste a MacAHK script or an AutoHotkey script. Clicks, keys, Send, Sleep, Run, WinWait, hotkey labels and ::hotstrings:: translate; anything unsupported is flagged below.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: 480)
@@ -582,6 +742,11 @@ struct ImportScriptSheet: View {
                     .font(.callout)
                 if let hk = parsed.hotkey {
                     Text("hotkey \(hk.display)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                if !parsed.hotstrings.isEmpty {
+                    Text("\(parsed.hotstrings.count) hotstrings")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -614,14 +779,20 @@ struct ImportScriptSheet: View {
                     .frame(width: 220)
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
-                Button("Create Macro") {
-                    app.createMacro(named: name, items: parsed.items,
-                                    hotkey: parsed.hotkey)
+                Button(parsed.items.isEmpty ? "Add Hotstrings"
+                                            : "Create Macro") {
+                    if !parsed.items.isEmpty {
+                        app.createMacro(named: name, items: parsed.items,
+                                        hotkey: parsed.hotkey)
+                    }
+                    app.addHotstrings(parsed.hotstrings)
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(parsed.items.isEmpty
-                          || name.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled((parsed.items.isEmpty
+                           && parsed.hotstrings.isEmpty)
+                          || (!parsed.items.isEmpty && name
+                              .trimmingCharacters(in: .whitespaces).isEmpty))
             }
             .frame(width: 520)
             .padding(.bottom, 18)
@@ -632,9 +803,12 @@ struct ImportScriptSheet: View {
     private static let sample = """
     ; example — click loop while F6 is held
     F6::
+    run Safari
+    winwait Safari, 5
     click 500, 400
     repeat 1000, 0.1, 0.3
     onlyif key f6
-    send done{Enter}
+    notify done
+    ::btw::by the way
     """
 }

@@ -55,6 +55,98 @@ enum ScreenSampler {
         return Double(total) / Double(n * n * 3 * 255)
     }
 
+    // Find the template anywhere on any display (full ImageSearch).
+    // Returns the global point (CGEvent coordinate space) at the center
+    // of the best match within tolerance (0…1), or nil. Costs a full
+    // screen grab plus a scan, so expect ~a few hundred ms per call.
+    static func findOnScreen(template: CGImage,
+                             tolerance: Double) -> CGPoint? {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(16, &ids, &count) == .success,
+              count > 0 else { return nil }
+        var best: (point: CGPoint, score: Double)?
+        for id in ids.prefix(Int(count)) {
+            guard let shot = CGDisplayCreateImage(id),
+                  let hit = locate(template: template, in: shot),
+                  hit.score <= tolerance else { continue }
+            // Match position is in screenshot pixels; displays report
+            // bounds in points (retina), so scale back.
+            let bounds = CGDisplayBounds(id)
+            let pt = CGPoint(
+                x: bounds.origin.x
+                    + hit.center.x * bounds.width / CGFloat(shot.width),
+                y: bounds.origin.y
+                    + hit.center.y * bounds.height / CGFloat(shot.height))
+            if best == nil || hit.score < best!.score {
+                best = (pt, hit.score)
+            }
+        }
+        return best?.point
+    }
+
+    // Naive template matching, made affordable by downscaling both
+    // images by the same factor and comparing only a coarse grid of
+    // template pixels, with an early-out against the best score so far.
+    // Returns the best match's center (haystack pixel coordinates) and
+    // its mean per-channel difference (0 identical … 1 opposite).
+    private static func locate(template: CGImage, in haystack: CGImage)
+        -> (center: CGPoint, score: Double)? {
+        let tw = template.width, th = template.height
+        let hw = haystack.width, hh = haystack.height
+        guard tw > 0, th > 0, tw <= hw, th <= hh else { return nil }
+
+        // Shrink the search space to ~640px on the long side, but never
+        // let the template drop below ~8px on its short side.
+        var f = max(1, (max(hw, hh) + 639) / 640)
+        while f > 1 && min(tw, th) / f < 8 { f -= 1 }
+
+        let sw = max(1, hw / f), sh = max(1, hh / f)
+        let stw = max(1, tw / f), sth = max(1, th / f)
+        guard stw <= sw, sth <= sh,
+              let hay = rgbaBytes(haystack, width: sw, height: sh),
+              let tpl = rgbaBytes(template, width: stw, height: sth)
+        else { return nil }
+
+        // ≤ ~13 sample points per axis, spread over the template.
+        let gx = max(1, stw / 12), gy = max(1, sth / 12)
+        var samples: [(Int, Int)] = []
+        var py = 0
+        while py < sth {
+            var px = 0
+            while px < stw {
+                samples.append((px, py))
+                px += gx
+            }
+            py += gy
+        }
+
+        var bestScore = Int.max
+        var bestX = 0, bestY = 0
+        for y in 0...(sh - sth) {
+            for x in 0...(sw - stw) {
+                var total = 0
+                for (px, py) in samples {
+                    let hi = ((y + py) * sw + (x + px)) * 4
+                    let ti = (py * stw + px) * 4
+                    total += abs(Int(hay[hi]) - Int(tpl[ti]))
+                        + abs(Int(hay[hi + 1]) - Int(tpl[ti + 1]))
+                        + abs(Int(hay[hi + 2]) - Int(tpl[ti + 2]))
+                    if total >= bestScore { break }
+                }
+                if total < bestScore {
+                    bestScore = total
+                    bestX = x
+                    bestY = y
+                }
+            }
+        }
+        guard bestScore < Int.max else { return nil }
+        let score = Double(bestScore) / Double(samples.count * 3 * 255)
+        return (CGPoint(x: Double((bestX + stw / 2) * f),
+                        y: Double((bestY + sth / 2) * f)), score)
+    }
+
     static func png(_ image: CGImage) -> Data? {
         NSBitmapImageRep(cgImage: image)
             .representation(using: .png, properties: [:])
@@ -65,16 +157,21 @@ enum ScreenSampler {
     }
 
     private static func rgbaBytes(_ image: CGImage, size: Int) -> [UInt8]? {
+        rgbaBytes(image, width: size, height: size)
+    }
+
+    private static func rgbaBytes(_ image: CGImage, width: Int,
+                                  height: Int) -> [UInt8]? {
         guard let ctx = CGContext(
-            data: nil, width: size, height: size, bitsPerComponent: 8,
-            bytesPerRow: size * 4, space: CGColorSpaceCreateDeviceRGB(),
+            data: nil, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
         ctx.interpolationQuality = .medium
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: size, height: size))
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         guard let ptr = ctx.data else { return nil }
         return Array(UnsafeBufferPointer(
             start: ptr.assumingMemoryBound(to: UInt8.self),
-            count: size * size * 4))
+            count: width * height * 4))
     }
 }

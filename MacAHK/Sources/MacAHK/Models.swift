@@ -61,7 +61,8 @@ struct RepeatSpec: Codable, Equatable {
 struct Condition: Equatable {
     enum Kind: String, Codable, CaseIterable, Identifiable {
         case keyHeld, mouseHeld, modifiersHeld, pointerIn
-        case pixelColor, regionLooksLike
+        case pixelColor, regionLooksLike, imageOnScreen
+        case appFrontmost, windowTitled, clipboardContains
         var id: String { rawValue }
 
         var title: String {
@@ -72,12 +73,18 @@ struct Condition: Equatable {
             case .pointerIn: return "pointer is in region"
             case .pixelColor: return "pixel color matches"
             case .regionLooksLike: return "area looks like snapshot"
+            case .imageOnScreen: return "image is on screen"
+            case .appFrontmost: return "app is frontmost"
+            case .windowTitled: return "a window title contains"
+            case .clipboardContains: return "clipboard contains"
             }
         }
 
-        // Screen captures are ~ms-expensive; pollers back off for these.
+        // Screen captures are ~ms-expensive (and the full-screen image
+        // search much more so); pollers back off for these.
         var isPixelBased: Bool {
             self == .pixelColor || self == .regionLooksLike
+                || self == .imageOnScreen
         }
     }
 
@@ -97,6 +104,9 @@ struct Condition: Equatable {
     var b: Int = 0
     var tolerance: Double = 12
     var reference: Data?
+    // App name / window title fragment / clipboard fragment for the
+    // app-aware and clipboard conditions. Matched case-insensitively.
+    var text: String = ""
 
     var hexColor: String { String(format: "#%02X%02X%02X", r, g, b) }
 
@@ -115,6 +125,15 @@ struct Condition: Equatable {
             what = "pixel (\(Int(x)), \(Int(y))) ≈ \(hexColor)"
         case .regionLooksLike:
             what = "area (\(Int(x)), \(Int(y)), \(Int(w))×\(Int(h))) matches snapshot"
+        case .imageOnScreen:
+            what = "image is somewhere on screen"
+        case .appFrontmost:
+            what = "“\(text)” is frontmost"
+        case .windowTitled:
+            what = "a window titled “\(text)” is open"
+        case .clipboardContains:
+            let short = text.count > 18 ? String(text.prefix(18)) + "…" : text
+            what = "clipboard contains “\(short)”"
         }
         return (negated ? "if not " : "if ") + what
     }
@@ -152,8 +171,51 @@ struct Condition: Equatable {
                let diff = ScreenSampler.difference(refImage, current) {
                 result = diff <= tolerance / 100.0
             }
+        case .imageOnScreen:
+            if let ref = reference,
+               let template = ScreenSampler.image(fromPNG: ref) {
+                result = ScreenSampler.findOnScreen(
+                    template: template,
+                    tolerance: tolerance / 100.0) != nil
+            }
+        case .appFrontmost:
+            let t = text.trimmingCharacters(in: .whitespaces)
+            if !t.isEmpty,
+               let front = NSWorkspace.shared.frontmostApplication {
+                result = (front.localizedName?
+                    .localizedCaseInsensitiveContains(t) ?? false)
+                    || (front.bundleIdentifier?
+                        .localizedCaseInsensitiveContains(t) ?? false)
+            }
+        case .windowTitled:
+            result = Condition.windowExists(titled: text)
+        case .clipboardContains:
+            let t = text
+            if !t.isEmpty,
+               let s = NSPasteboard.general.string(forType: .string) {
+                result = s.localizedCaseInsensitiveContains(t)
+            }
         }
         return negated ? !result : result
+    }
+
+    // True when any on-screen window's title (or its owning app's name)
+    // contains the fragment. Window titles are only visible to us when
+    // Screen Recording is granted; app names always are, so "wait until
+    // window Safari" degrades gracefully without the permission.
+    static func windowExists(titled fragment: String) -> Bool {
+        let t = fragment.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return false }
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID) as? [[String: Any]] else { return false }
+        for info in list {
+            if let name = info[kCGWindowName as String] as? String,
+               name.localizedCaseInsensitiveContains(t) { return true }
+            if let owner = info[kCGWindowOwnerName as String] as? String,
+               owner.localizedCaseInsensitiveContains(t) { return true }
+        }
+        return false
     }
 }
 
@@ -162,7 +224,7 @@ struct Condition: Equatable {
 extension Condition: Codable {
     private enum CodingKeys: String, CodingKey {
         case kind, negated, keyCode, button, modifiers, x, y, w, h
-        case r, g, b, tolerance, reference
+        case r, g, b, tolerance, reference, text
     }
 
     init(from decoder: Decoder) throws {
@@ -183,6 +245,7 @@ extension Condition: Codable {
         tolerance = try c.decodeIfPresent(Double.self,
                                           forKey: .tolerance) ?? 12
         reference = try c.decodeIfPresent(Data.self, forKey: .reference)
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
     }
 
     func encode(to encoder: Encoder) throws {
@@ -201,6 +264,7 @@ extension Condition: Codable {
         try c.encode(b, forKey: .b)
         try c.encode(tolerance, forKey: .tolerance)
         try c.encodeIfPresent(reference, forKey: .reference)
+        try c.encode(text, forKey: .text)
     }
 }
 
@@ -241,6 +305,14 @@ enum ManualAction: Codable, Equatable {
     case keyPress(keyCode: UInt16, modifiers: UInt)
     case typeText(text: String)
     case scroll(dx: Int, dy: Int)
+    case openApp(name: String)
+    case openURL(url: String)
+    case setClipboard(text: String)
+    case pasteClipboard
+    case clickImage(reference: Data?, tolerance: Double,
+                    button: MouseButtonKind, moveOnly: Bool)
+    case notify(message: String)
+    case beep
     case wait
     case waitUntil(condition: Condition, timeout: Double)
     case goTo(step: Int, times: Int)
@@ -260,6 +332,25 @@ enum ManualAction: Codable, Equatable {
             return "type “\(short)”"
         case .scroll(let dx, let dy):
             return "scroll (\(dx), \(dy))"
+        case .openApp(let name):
+            return "open app “\(name)”"
+        case .openURL(let url):
+            let short = url.count > 36 ? String(url.prefix(36)) + "…" : url
+            return "open \(short)"
+        case .setClipboard(let text):
+            let short = text.count > 24 ? String(text.prefix(24)) + "…" : text
+            return "set clipboard to “\(short)”"
+        case .pasteClipboard:
+            return "paste clipboard (⌘V)"
+        case .clickImage(_, _, let button, let moveOnly):
+            return moveOnly ? "move pointer to image on screen"
+                            : "\(button.rawValue) click image on screen"
+        case .notify(let message):
+            let short = message.count > 24
+                ? String(message.prefix(24)) + "…" : message
+            return "notify “\(short)”"
+        case .beep:
+            return "beep"
         case .wait:
             return "wait"
         case .waitUntil(let condition, let timeout):

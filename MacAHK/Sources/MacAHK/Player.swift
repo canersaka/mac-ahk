@@ -192,44 +192,64 @@ final class Player {
             }
 
         case .keyPress(let code, let modifiers):
-            let flags = Hotkey(keyCode: code, modifiers: modifiers).cgFlags
-            if let down = CGEvent(keyboardEventSource: src,
-                                  virtualKey: CGKeyCode(code), keyDown: true) {
-                down.flags = flags
-                down.post(tap: .cghidEventTap)
-            }
-            Thread.sleep(forTimeInterval: 0.02)
-            if let up = CGEvent(keyboardEventSource: src,
-                                virtualKey: CGKeyCode(code), keyDown: false) {
-                up.flags = flags
-                up.post(tap: .cghidEventTap)
-            }
+            Synth.tapKey(CGKeyCode(code),
+                         flags: Hotkey(keyCode: code,
+                                       modifiers: modifiers).cgFlags,
+                         source: src)
 
         case .typeText(let text):
-            var chars = Array(text.utf16)
-            // The unicode-string API takes short runs reliably; chunk it.
-            var start = 0
-            while start < chars.count {
-                let run = Array(chars[start..<min(start + 20, chars.count)])
-                if let down = CGEvent(keyboardEventSource: src,
-                                      virtualKey: 0, keyDown: true) {
-                    down.keyboardSetUnicodeString(stringLength: run.count,
-                                                  unicodeString: run)
-                    down.post(tap: .cghidEventTap)
-                }
-                if let up = CGEvent(keyboardEventSource: src,
-                                    virtualKey: 0, keyDown: false) {
-                    up.post(tap: .cghidEventTap)
-                }
-                start += 20
-                Thread.sleep(forTimeInterval: 0.01)
-            }
+            Synth.typeText(text, source: src)
 
         case .scroll(let dx, let dy):
             CGEvent(scrollWheelEvent2Source: src, units: .pixel,
                     wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx),
                     wheel3: 0)?
                 .post(tap: .cghidEventTap)
+
+        case .openApp(let name):
+            DispatchQueue.main.async { AppLauncher.openApp(named: name) }
+            // Give the app a moment to come forward before the next step.
+            Thread.sleep(forTimeInterval: 0.3)
+
+        case .openURL(let urlString):
+            let trimmed = urlString.trimmingCharacters(in: .whitespaces)
+            if let url = URL(string: trimmed) {
+                DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+            }
+
+        case .setClipboard(let text):
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(text, forType: .string)
+
+        case .pasteClipboard:
+            Synth.tapKey(9, flags: .maskCommand, source: src)  // ⌘V
+
+        case .clickImage(let reference, let tolerance, let button,
+                         let moveOnly):
+            guard let data = reference,
+                  let template = ScreenSampler.image(fromPNG: data),
+                  let point = ScreenSampler.findOnScreen(
+                      template: template, tolerance: tolerance / 100.0)
+            else { break }  // not found → the step is simply skipped
+            if moveOnly {
+                CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
+                        mouseCursorPosition: point, mouseButton: .left)?
+                    .post(tap: .cghidEventTap)
+            } else {
+                for type in [button.downType, button.upType] {
+                    CGEvent(mouseEventSource: src, mouseType: type,
+                            mouseCursorPosition: point,
+                            mouseButton: button.cgButton)?
+                        .post(tap: .cghidEventTap)
+                }
+            }
+
+        case .notify(let message):
+            DispatchQueue.main.async { Notifier.show(message) }
+
+        case .beep:
+            NSSound.beep()
 
         case .waitUntil, .goTo, .stopPlayback:
             break  // control flow — handled by the engine in run()

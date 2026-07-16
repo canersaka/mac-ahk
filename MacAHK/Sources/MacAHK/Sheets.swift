@@ -87,6 +87,7 @@ struct ConditionModel {
     var colorPicked = false
     var tolerance = 12.0
     var reference: Data?
+    var text = ""
 
     init() {}
 
@@ -105,6 +106,7 @@ struct ConditionModel {
         colorPicked = c.kind == .pixelColor
         tolerance = c.tolerance
         reference = c.reference
+        text = c.text
     }
 
     var modifiersRaw: UInt {
@@ -121,18 +123,22 @@ struct ConditionModel {
         case .keyHeld: return key != nil
         case .modifiersHeld: return modifiersRaw != 0
         case .pixelColor: return colorPicked
-        case .regionLooksLike: return reference != nil
+        case .regionLooksLike, .imageOnScreen: return reference != nil
+        case .appFrontmost, .windowTitled, .clipboardContains:
+            return !text.trimmingCharacters(in: .whitespaces).isEmpty
         default: return true
         }
     }
 
     func build() -> Condition? {
         guard valid else { return nil }
+        let keepsSnapshot = kind == .regionLooksLike || kind == .imageOnScreen
         return Condition(kind: kind, negated: negated,
                          keyCode: key?.keyCode ?? 0, button: button,
                          modifiers: modifiersRaw, x: x, y: y, w: w, h: h,
                          r: r, g: g, b: b, tolerance: tolerance,
-                         reference: kind == .regionLooksLike ? reference : nil)
+                         reference: keepsSnapshot ? reference : nil,
+                         text: text)
     }
 }
 
@@ -222,37 +228,78 @@ struct ConditionFields: View {
         case .regionLooksLike:
             screenRecordingRow
             regionFields
-            LabeledContent("Snapshot") {
-                HStack(spacing: 8) {
-                    if let data = model.reference,
-                       let img = NSImage(data: data) {
-                        Image(nsImage: img)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: 72, maxHeight: 44)
-                            .overlay(RoundedRectangle(cornerRadius: 4)
-                                .stroke(.quaternary))
-                    }
-                    CaptureCursorButton(
-                        label: model.reference == nil
-                            ? "Capture snapshot of area (2s)"
-                            : "Recapture (2s)") { _ in
-                        let rect = CGRect(x: model.x, y: model.y,
-                                          width: max(model.w, 1),
-                                          height: max(model.h, 1))
-                        if let img = ScreenSampler.capture(rect: rect),
-                           let png = ScreenSampler.png(img) {
-                            model.reference = png
-                        }
-                    }
-                }
-            }
+            snapshotRow
             LabeledContent("") {
                 Text("Set the area first, arrange the screen how it should look, then capture. Playback compares the live area against this snapshot.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             toleranceRow(max: 30)
+        case .imageOnScreen:
+            screenRecordingRow
+            regionFields
+            snapshotRow
+            LabeledContent("") {
+                Text("Frame the image with the area above and capture it. Playback then scans the entire screen for it, wherever it has moved.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            toleranceRow(max: 30)
+        case .appFrontmost:
+            LabeledContent("App") {
+                TextField("app name, e.g. Safari", text: $model.text)
+                    .frame(width: 220)
+            }
+            LabeledContent("") {
+                Text("Matches the frontmost app's name or bundle id, case-insensitively.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .windowTitled:
+            LabeledContent("Title contains") {
+                TextField("window title fragment", text: $model.text)
+                    .frame(width: 220)
+            }
+            LabeledContent("") {
+                Text("True while any open window's title (or its app's name) contains this text. Titles are only visible with the Screen Recording permission; app names always match.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .clipboardContains:
+            LabeledContent("Clipboard contains") {
+                TextField("text fragment", text: $model.text)
+                    .frame(width: 220)
+            }
+        }
+    }
+
+    // Snapshot capture, shared by the fixed-region and find-anywhere
+    // image conditions.
+    private var snapshotRow: some View {
+        LabeledContent("Snapshot") {
+            HStack(spacing: 8) {
+                if let data = model.reference,
+                   let img = NSImage(data: data) {
+                    Image(nsImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 72, maxHeight: 44)
+                        .overlay(RoundedRectangle(cornerRadius: 4)
+                            .stroke(.quaternary))
+                }
+                CaptureCursorButton(
+                    label: model.reference == nil
+                        ? "Capture snapshot of area (2s)"
+                        : "Recapture (2s)") { _ in
+                    let rect = CGRect(x: model.x, y: model.y,
+                                      width: max(model.w, 1),
+                                      height: max(model.h, 1))
+                    if let img = ScreenSampler.capture(rect: rect),
+                       let png = ScreenSampler.png(img) {
+                        model.reference = png
+                    }
+                }
+            }
         }
     }
 
@@ -286,21 +333,8 @@ struct ConditionFields: View {
         }
     }
 
-    @ViewBuilder
     private var screenRecordingRow: some View {
-        if !Permissions.screenRecording {
-            LabeledContent("Permission") {
-                Button("Grant Screen Recording…") {
-                    Permissions.requestScreenRecording()
-                    Permissions.openScreenRecordingSettings()
-                }
-            }
-            LabeledContent("") {
-                Text("Pixel conditions read the screen, which needs the Screen Recording permission (only used for these checks). Relaunch MacAHK after granting.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-        }
+        ScreenRecordingGrantRows()
     }
 
     private func toleranceRow(max maxValue: Double) -> some View {
@@ -310,6 +344,26 @@ struct ConditionFields: View {
                     .frame(width: 140)
                 Text(String(format: "%.0f%%", model.tolerance))
                     .font(.callout.monospacedDigit())
+            }
+        }
+    }
+}
+
+// Shown wherever a screen-reading feature is configured before the
+// Screen Recording permission has been granted.
+struct ScreenRecordingGrantRows: View {
+    var body: some View {
+        if !Permissions.screenRecording {
+            LabeledContent("Permission") {
+                Button("Grant Screen Recording…") {
+                    Permissions.requestScreenRecording()
+                    Permissions.openScreenRecordingSettings()
+                }
+            }
+            LabeledContent("") {
+                Text("Pixel and image checks read the screen, which needs the Screen Recording permission (only used for these checks). Relaunch MacAHK after granting.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
         }
     }
@@ -350,6 +404,13 @@ struct ActionFormModel {
         case typeText = "Type Text"
         case scroll = "Scroll"
         case movePointer = "Move Pointer"
+        case clickImage = "Click Image on Screen"
+        case openApp = "Open App"
+        case openURL = "Open URL"
+        case setClipboard = "Set Clipboard"
+        case pasteClipboard = "Paste Clipboard"
+        case notify = "Show Notification"
+        case beep = "Beep"
         case wait = "Wait"
         case waitUntil = "Wait Until…"
         case goTo = "Go To Step"
@@ -368,6 +429,12 @@ struct ActionFormModel {
     var timeout = 0.0
     var goToStep = 1
     var goToTimes = 0
+    // Click Image: the template snapshot plus the capture area used to
+    // frame it (the area itself isn't stored in the action).
+    var refData: Data?
+    var refW = 100.0, refH = 60.0
+    var tolerance = 12.0
+    var moveOnly = false
 
     init() {}
 
@@ -386,6 +453,25 @@ struct ActionFormModel {
             kind = .typeText; text = t
         case .scroll(let dx, let dy):
             kind = .scroll; scrollDX = dx; scrollDY = dy
+        case .openApp(let name):
+            kind = .openApp; text = name
+        case .openURL(let url):
+            kind = .openURL; text = url
+        case .setClipboard(let t):
+            kind = .setClipboard; text = t
+        case .pasteClipboard:
+            kind = .pasteClipboard
+        case .clickImage(let reference, let atolerance, let abutton,
+                         let amoveOnly):
+            kind = .clickImage
+            refData = reference
+            tolerance = atolerance
+            button = abutton
+            moveOnly = amoveOnly
+        case .notify(let message):
+            kind = .notify; text = message
+        case .beep:
+            kind = .beep
         case .wait:
             kind = .wait
         case .waitUntil(let condition, let atimeout):
@@ -402,7 +488,10 @@ struct ActionFormModel {
     var valid: Bool {
         switch kind {
         case .keyPress: return key != nil
-        case .typeText: return !text.isEmpty
+        case .typeText, .setClipboard, .notify: return !text.isEmpty
+        case .openApp, .openURL:
+            return !text.trimmingCharacters(in: .whitespaces).isEmpty
+        case .clickImage: return refData != nil
         case .waitUntil: return waitCondition.valid
         default: return true
         }
@@ -423,6 +512,22 @@ struct ActionFormModel {
             return .typeText(text: text)
         case .scroll:
             return .scroll(dx: scrollDX, dy: scrollDY)
+        case .openApp:
+            return .openApp(name: text.trimmingCharacters(in: .whitespaces))
+        case .openURL:
+            return .openURL(url: text.trimmingCharacters(in: .whitespaces))
+        case .setClipboard:
+            return .setClipboard(text: text)
+        case .pasteClipboard:
+            return .pasteClipboard
+        case .clickImage:
+            guard let data = refData else { return nil }
+            return .clickImage(reference: data, tolerance: tolerance,
+                               button: button, moveOnly: moveOnly)
+        case .notify:
+            return .notify(message: text)
+        case .beep:
+            return .beep
         case .wait:
             return .wait
         case .waitUntil:
@@ -478,6 +583,129 @@ struct ActionFields: View {
                 TextField("text to type", text: $model.text)
                     .labelsHidden()
                     .frame(maxWidth: .infinity)
+            }
+        case .openApp:
+            LabeledContent("App") {
+                TextField("name, bundle id, or path", text: $model.text)
+                    .frame(width: 220)
+            }
+            LabeledContent("") {
+                Text("Launches the app, or brings it to the front if it's already running. “Safari”, “com.apple.Safari”, and full .app paths all work.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .openURL:
+            LabeledContent("URL") {
+                TextField("https://…", text: $model.text)
+                    .frame(maxWidth: .infinity)
+            }
+            LabeledContent("") {
+                Text("Opens in the default handler — web addresses in your browser, mailto: in your mail app, and so on.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .setClipboard:
+            LabeledContent("Text") {
+                TextField("clipboard contents", text: $model.text)
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
+            }
+        case .pasteClipboard:
+            LabeledContent("") {
+                Text("Presses ⌘V — pastes whatever is on the clipboard into the focused app.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .clickImage:
+            ScreenRecordingGrantRows()
+            LabeledContent("Capture from") {
+                HStack(spacing: 6) {
+                    NumberField(value: $model.x)
+                    Text("×").foregroundStyle(.tertiary)
+                    NumberField(value: $model.y)
+                }
+            }
+            LabeledContent("") {
+                CaptureCursorButton(label: "Set top-left from cursor (2s)") {
+                    model.x = $0.x
+                    model.y = $0.y
+                }
+            }
+            LabeledContent("Size") {
+                HStack(spacing: 6) {
+                    NumberField(value: $model.refW)
+                    Text("×").foregroundStyle(.tertiary)
+                    NumberField(value: $model.refH)
+                }
+            }
+            LabeledContent("") {
+                CaptureCursorButton(label: "Set bottom-right from cursor (2s)") {
+                    model.refW = max(1, $0.x - model.x)
+                    model.refH = max(1, $0.y - model.y)
+                }
+            }
+            LabeledContent("Image") {
+                HStack(spacing: 8) {
+                    if let data = model.refData,
+                       let img = NSImage(data: data) {
+                        Image(nsImage: img)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: 72, maxHeight: 44)
+                            .overlay(RoundedRectangle(cornerRadius: 4)
+                                .stroke(.quaternary))
+                    }
+                    CaptureCursorButton(
+                        label: model.refData == nil
+                            ? "Capture image in area (2s)"
+                            : "Recapture (2s)") { _ in
+                        let rect = CGRect(x: model.x, y: model.y,
+                                          width: max(model.refW, 1),
+                                          height: max(model.refH, 1))
+                        if let img = ScreenSampler.capture(rect: rect),
+                           let png = ScreenSampler.png(img) {
+                            model.refData = png
+                        }
+                    }
+                }
+            }
+            Picker("Button", selection: $model.button) {
+                ForEach(MouseButtonKind.allCases) { b in
+                    Text(b.rawValue).tag(b)
+                }
+            }
+            .pickerStyle(.menu)
+            Toggle("Move the pointer only, don't click",
+                   isOn: $model.moveOnly)
+            LabeledContent("Tolerance") {
+                HStack(spacing: 8) {
+                    Slider(value: $model.tolerance, in: 0...30)
+                        .frame(width: 140)
+                    Text(String(format: "%.0f%%", model.tolerance))
+                        .font(.callout.monospacedDigit())
+                }
+            }
+            LabeledContent("") {
+                Text("Playback scans the whole screen for this image and clicks the center of the best match. If it isn't found, the step is skipped — combine with Wait Until “image is on screen” to wait for it first.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .notify:
+            LabeledContent("Message") {
+                TextField("notification text", text: $model.text)
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
+            }
+            LabeledContent("") {
+                Text("Posts a notification banner — handy as a checkpoint in long macros.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .beep:
+            LabeledContent("") {
+                Text("Plays the system alert sound.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         case .scroll:
             LabeledContent("Horizontal (px)") {

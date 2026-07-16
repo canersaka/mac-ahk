@@ -18,7 +18,14 @@ final class AppState: ObservableObject {
         case playing(name: String, loop: Int, totalLoops: Int)
     }
 
-    @Published var mode: Mode = .idle
+    @Published var mode: Mode = .idle {
+        didSet {
+            // Text expansion pauses whenever the app is recording or
+            // playing: expansions would pollute a recording, and typed
+            // text during playback comes from the macro, not the user.
+            hotstrings.suspended = mode != .idle
+        }
+    }
     @Published var status = "Ready."
     @Published var draft: DraftRecording?
     @Published var selection: UUID?
@@ -34,13 +41,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    @Published var hotstringsEnabled = true {
+        didSet {
+            UserDefaults.standard.set(hotstringsEnabled,
+                                      forKey: Self.hotstringsEnabledKey)
+            rebuildHotstrings()
+        }
+    }
+
     let store = MacroStore()
+    let hotstringStore = HotstringStore()
     private let recorder = Recorder()
     private let player = Player()
     private let hotkeys = HotkeyCenter()
+    private let hotstrings = HotstringCenter()
     private var countdownTask: Task<Void, Never>?
     private var appendCandidateID: UUID?
     private static let recordHotkeyDefaultsKey = "recordHotkey"
+    private static let hotstringsEnabledKey = "hotstringsEnabled"
 
     init() {
         recorder.onEscape = { [weak self] in self?.stopAll() }
@@ -57,6 +75,16 @@ final class AppState: ObservableObject {
             hotkeys.recordHotkey = hk
         }
         hotkeys.rebuild(from: store.macros)
+
+        if UserDefaults.standard.object(
+            forKey: Self.hotstringsEnabledKey) != nil {
+            hotstringsEnabled = UserDefaults.standard.bool(
+                forKey: Self.hotstringsEnabledKey)
+        }
+        hotstringStore.onChange = { [weak self] in
+            self?.rebuildHotstrings()
+        }
+        rebuildHotstrings()
     }
 
     var isBusy: Bool { mode != .idle }
@@ -297,9 +325,24 @@ final class AppState: ObservableObject {
         modify(macro.id) { $0.name = name }
     }
 
-    // While a sheet is teaching a new combo, hotkeys must not fire.
+    // While a sheet is teaching a new combo, hotkeys must not fire (and
+    // hotstrings must not expand what's being typed into the sheet).
     func suspendHotkeys(_ suspended: Bool) {
         hotkeys.captureSuspended = suspended
+        hotstrings.captureSuspended = suspended
+    }
+
+    // MARK: hotstrings
+
+    func rebuildHotstrings() {
+        hotstrings.rebuild(from: hotstringStore.hotstrings,
+                           masterEnabled: hotstringsEnabled)
+    }
+
+    func addHotstrings(_ list: [Hotstring]) {
+        guard !list.isEmpty else { return }
+        hotstringStore.hotstrings.append(contentsOf: list)
+        status = "Added \(list.count) hotstring\(list.count == 1 ? "" : "s")."
     }
 
     private func persistRecordHotkey() {

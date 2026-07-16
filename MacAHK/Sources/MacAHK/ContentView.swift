@@ -5,6 +5,7 @@ struct ContentView: View {
     @State private var capturingHotkeyFor: Macro?
     @State private var capturingRecordHotkey = false
     @State private var importingScript = false
+    @State private var editingHotstrings = false
 
     var body: some View {
         // The status bar lives outside the navigation layout so it can
@@ -37,6 +38,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $importingScript) {
             ImportScriptSheet()
+        }
+        .sheet(isPresented: $editingHotstrings) {
+            HotstringsSheet(store: app.hotstringStore)
         }
     }
 
@@ -232,12 +236,25 @@ struct ContentView: View {
         }
     }
 
+    private var hotstringsLabel: String {
+        let n = app.hotstringStore.hotstrings.count
+        return n > 0 ? "Hotstrings (\(n))" : "Hotstrings…"
+    }
+
     private var statusBar: some View {
         HStack(spacing: 14) {
             Text(app.status)
                 .font(.callout)
                 .lineLimit(1)
             Spacer()
+            Button {
+                editingHotstrings = true
+            } label: {
+                Label(hotstringsLabel, systemImage: "textformat.abc")
+                    .font(.callout)
+            }
+            .buttonStyle(.borderless)
+            .help("Text expansion: type a trigger anywhere and it becomes its expansion (like AHK ::btw::by the way)")
             Button {
                 capturingRecordHotkey = true
             } label: {

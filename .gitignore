@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+MacAHK/.build/
+MacAHK/MacAHK.app/
+MacAHK/MacAHK.dmg
